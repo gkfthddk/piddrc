@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "debugpy",
+      "request": "launch", 
+      "name": "Debug Script",
+      "python": "/users/yulee/micromamba/envs/torch290/bin/python3",
+      "program": "${workspaceFolder}/${input:scriptFile}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "${input:gpuDevice}"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "scriptFile",
+      "type": "pickString",
+      "description": "Which script would you like to debug?",
+      "options": [
+        "run.py",
+        "submit.py",
+        "toh5.py",
+        "pm.py",
+        "nh5.py"
+      ]
+    },
+    {
+      "id": "gpuDevice", 
+      "type": "promptString",
+      "description": "Which GPU device number to use?"
+    }
+  ]
+}
