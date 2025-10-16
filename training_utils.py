@@ -60,7 +60,7 @@ class Trainer:
         best_loss = 30
         early_stop = 0
         check = 0
-        X0, X1, X2, Y1, Y2, _ = train_loader.dataset[0]
+        X0, X1, X2, Y1, Y2 = train_loader.dataset[0]
         print("X0", X0.shape, "X1", X1.shape, "X2", X2.shape)
         inputs0 = th.empty(self.model_wrapper.batch_size, X0.shape[0], X0.shape[1], device='cuda')
         inputs1 = th.empty(self.model_wrapper.batch_size, X1.shape[0], X1.shape[1], device='cuda')
@@ -75,7 +75,7 @@ class Trainer:
                 bar = tqdm.tqdm(total=len(train_loader), nrows=2, leave=val_loader is None)
             self.model_wrapper.net.train()
             tick = 0
-            for X0, X1, X2, Y1, Y2, _ in train_loader:
+            for X0, X1, X2, Y1, Y2 in train_loader:
                 inputs0.copy_(X0, non_blocking=True)
                 inputs1.copy_(X1, non_blocking=True)
                 inputs2.copy_(X2, non_blocking=True)
@@ -137,7 +137,7 @@ class Trainer:
                 th.set_grad_enabled(False)
                 tick = 0
 
-                for X0, X1, X2, Y1, Y2, _ in val_loader:
+                for X0, X1, X2, Y1, Y2 in val_loader:
                     X0 = X0.to("cuda", non_blocking=True)
                     X1 = X1.to("cuda", non_blocking=True)
                     X2 = X2.to("cuda", non_blocking=True)
