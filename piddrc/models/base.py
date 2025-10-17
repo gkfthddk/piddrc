@@ -56,4 +56,56 @@ class MultiTaskHead(nn.Module):
         return ModelOutputs(logits=logits, energy=energy, log_sigma=log_sigma, extras={"shared": shared})
 
 
-__all__ = ["ModelOutputs", "MultiTaskHead"]
+class MaskedMaxMeanPool(nn.Module):
+    """Combine masked global max and mean pooling for variable-length sets."""
+
+    def __init__(self, feature_dim: int) -> None:
+        super().__init__()
+        self.feature_dim = feature_dim
+
+    @property
+    def output_dim(self) -> int:
+        return self.feature_dim * 2
+
+    def forward(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        valid = mask.unsqueeze(-1)
+        masked = features.masked_fill(~valid.bool(), float("-inf"))
+        global_max = masked.max(dim=1).values
+        global_max[~torch.isfinite(global_max)] = 0.0
+        denom = valid.float().sum(dim=1).clamp_min(1.0)
+        mean = (features * valid.float()).sum(dim=1) / denom
+        return torch.cat([global_max, mean], dim=-1)
+
+
+class SummaryProjector(nn.Module):
+    """Optional projection layer that fuses summary features with set embeddings."""
+
+    def __init__(self, summary_dim: int, target_dim: int, enabled: bool = True) -> None:
+        super().__init__()
+        if enabled:
+            self.proj = nn.Sequential(
+                nn.LayerNorm(summary_dim),
+                nn.Linear(summary_dim, target_dim),
+                nn.GELU(),
+            )
+            self._output_dim = target_dim
+        else:
+            self.proj = None
+            self._output_dim = 0
+
+    @property
+    def output_dim(self) -> int:
+        return self._output_dim
+
+    def forward(self, summary: torch.Tensor | None) -> torch.Tensor | None:
+        if self.proj is None or summary is None:
+            return None
+        return self.proj(summary)
+
+
+__all__ = [
+    "ModelOutputs",
+    "MultiTaskHead",
+    "MaskedMaxMeanPool",
+    "SummaryProjector",
+]

@@ -9,7 +9,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from .base import ModelOutputs, MultiTaskHead
+from .base import MaskedMaxMeanPool, ModelOutputs, MultiTaskHead, SummaryProjector
 
 _MAMBA_SPEC = importlib.util.find_spec("mamba_ssm")
 if _MAMBA_SPEC is not None:
@@ -81,12 +81,9 @@ class PointMamba(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(hidden_dim)
-        feature_dim = hidden_dim * 2
-        if use_summary:
-            self.summary_proj = nn.Sequential(nn.LayerNorm(summary_dim), nn.Linear(summary_dim, hidden_dim), nn.GELU())
-            feature_dim += hidden_dim
-        else:
-            self.summary_proj = None
+        self.pool = MaskedMaxMeanPool(hidden_dim)
+        self.summary_proj = SummaryProjector(summary_dim, hidden_dim, enabled=use_summary)
+        feature_dim = self.pool.output_dim + self.summary_proj.output_dim
         self.head = MultiTaskHead(
             feature_dim,
             hidden_dims=head_hidden,
@@ -102,14 +99,9 @@ class PointMamba(nn.Module):
         for block in self.blocks:
             x = block(x, mask)
         x = self.norm(x)
-        valid = mask.unsqueeze(-1)
-        masked = x.masked_fill(~valid.bool(), float("-inf"))
-        global_max = torch.max(masked, dim=1).values
-        global_max[~torch.isfinite(global_max)] = 0.0
-        mean = (x * valid.float()).sum(dim=1) / valid.float().sum(dim=1).clamp_min(1.0)
-        features = torch.cat([global_max, mean], dim=-1)
-        if self.summary_proj is not None:
-            summary = self.summary_proj(batch["summary"])
+        features = self.pool(x, mask)
+        summary = self.summary_proj(batch.get("summary"))
+        if summary is not None:
             features = torch.cat([features, summary], dim=-1)
         return self.head(features)
 

@@ -7,7 +7,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from .base import ModelOutputs, MultiTaskHead
+from .base import MaskedMaxMeanPool, ModelOutputs, MultiTaskHead, SummaryProjector
 
 
 class PointNetBackbone(nn.Module):
@@ -24,14 +24,8 @@ class PointNetBackbone(nn.Module):
             prev = hidden
         self.mlp = nn.Sequential(*layers)
 
-    def forward(self, points: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        features = self.mlp(points)
-        valid = mask.unsqueeze(-1)
-        masked = features.masked_fill(~valid, float("-inf"))
-        global_max = torch.max(masked, dim=1).values
-        global_max[~torch.isfinite(global_max)] = 0.0
-        mean = (features * valid.float()).sum(dim=1) / valid.float().sum(dim=1).clamp_min(1.0)
-        return torch.cat([global_max, mean], dim=-1)
+    def forward(self, points: torch.Tensor) -> torch.Tensor:
+        return self.mlp(points)
 
 
 class PointNetModel(nn.Module):
@@ -51,12 +45,9 @@ class PointNetModel(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone = PointNetBackbone(in_channels, backbone_channels)
-        feature_dim = 2 * backbone_channels[-1]
-        if use_summary:
-            self.summary_proj = nn.Sequential(nn.LayerNorm(summary_dim), nn.Linear(summary_dim, backbone_channels[-1]), nn.GELU())
-            feature_dim += backbone_channels[-1]
-        else:
-            self.summary_proj = None
+        self.pool = MaskedMaxMeanPool(backbone_channels[-1])
+        self.summary_proj = SummaryProjector(summary_dim, backbone_channels[-1], enabled=use_summary)
+        feature_dim = self.pool.output_dim + self.summary_proj.output_dim
         self.head = MultiTaskHead(
             feature_dim,
             hidden_dims=head_hidden,
@@ -68,11 +59,11 @@ class PointNetModel(nn.Module):
     def forward(self, batch: dict[str, torch.Tensor]) -> ModelOutputs:
         points = batch["points"]
         mask = batch["mask"]
-        global_features = self.backbone(points, mask)
-        features = global_features
-        if self.summary_proj is not None:
-            summary = self.summary_proj(batch["summary"])
-            features = torch.cat([global_features, summary], dim=-1)
+        per_point = self.backbone(points)
+        features = self.pool(per_point, mask)
+        summary = self.summary_proj(batch.get("summary"))
+        if summary is not None:
+            features = torch.cat([features, summary], dim=-1)
         return self.head(features)
 
 
