@@ -1,0 +1,292 @@
+"""Data loading utilities for dual-readout calorimeter studies.
+
+The module implements an :class:`~torch.utils.data.Dataset` that reads
+hit-level information from HDF5 files, performs lightweight feature
+engineering, and prepares batched tensors that are suitable for
+point-cloud style neural networks.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+try:
+    import h5py
+except ModuleNotFoundError as exc:  # pragma: no cover - helpful message during unit tests
+    raise ModuleNotFoundError("The h5py package is required to use the data utilities.") from exc
+
+SummaryFn = Callable[[np.ndarray, Mapping[str, int]], np.ndarray]
+
+
+def _decode_label(value: np.ndarray) -> str:
+    """Decode a scalar value coming from HDF5 into a Python string."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, np.generic):
+        if value.dtype.kind in {"S", "a"}:  # byte string
+            return value.astype(str)
+        if value.dtype.kind in {"U"}:
+            return str(value)
+        return value.item()  # type: ignore[return-value]
+    return str(value)
+
+
+@dataclass
+class EventRecord:
+    """Container returned by :class:`DualReadoutEventDataset` for one event."""
+
+    points: torch.Tensor
+    summary: torch.Tensor
+    label: int
+    energy: torch.Tensor
+    event_id: Tuple[int, int]
+
+
+class DualReadoutEventDataset(Dataset):
+    """Dataset that loads dual-readout calorimeter events from HDF5 files.
+
+    Parameters
+    ----------
+    files:
+        Sequence of paths to HDF5 files. Each file is expected to contain
+        datasets named after the entries listed in ``hit_features``, the
+        classification label ``label_key`` and the regression target
+        ``energy_key``.
+    hit_features:
+        Feature names to read per hit. They must all share the shape
+        ``(num_events, num_hits)`` within the HDF5 file.
+    label_key:
+        Dataset name containing the per-event classification labels.
+    energy_key:
+        Dataset name containing the regression target (true energy).
+    max_points:
+        If not ``None``, each event is randomly down-sampled to this
+        number of points using a deterministic RNG seeded by the event
+        index. The operation preserves ordering for reproducibility.
+    scintillation_key / cherenkov_key:
+        Names of the features that correspond to the scintillation (S)
+        and Cherenkov (C) signals. They must be present in
+        ``hit_features``. They are required for the default summary
+        statistics.
+    depth_key:
+        Optional name of the feature describing the longitudinal depth of
+        a hit (usually the ``z`` coordinate).
+    time_key:
+        Optional time-of-arrival feature. When provided, the mean
+        arrival time is computed as part of the summary features.
+    summary_fn:
+        Custom callable that receives the point array of shape
+        ``(num_hits, num_features)`` and a mapping from feature name to
+        column index, and returns a 1-D numpy array of summary features.
+        By default a physics-motivated summary vector consisting of
+        ``[S_sum, C_sum, total, C_over_S, S_minus_C, depth_mean,
+        depth_std, time_mean]`` is produced.
+    class_names:
+        Optional sequence defining the label ordering. When ``None`` the
+        dataset determines the unique labels by scanning the input files.
+    cache_file_handles:
+        When ``True`` (default) the HDF5 files are kept open per worker
+        process to avoid frequent reopen/close operations.
+    """
+
+    def __init__(
+        self,
+        files: Sequence[str],
+        *,
+        hit_features: Sequence[str],
+        label_key: str,
+        energy_key: str,
+        max_points: Optional[int] = None,
+        scintillation_key: str = "S",
+        cherenkov_key: str = "C",
+        depth_key: Optional[str] = "z",
+        time_key: Optional[str] = "t",
+        summary_fn: Optional[SummaryFn] = None,
+        class_names: Optional[Sequence[str]] = None,
+        cache_file_handles: bool = True,
+    ) -> None:
+        if len(files) == 0:
+            raise ValueError("At least one input file must be provided.")
+        self.files: Tuple[str, ...] = tuple(files)
+        self.hit_features: Tuple[str, ...] = tuple(hit_features)
+        if len(self.hit_features) == 0:
+            raise ValueError("hit_features must contain at least one feature name")
+        self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
+        for required_feature, name in (("scintillation", scintillation_key), ("cherenkov", cherenkov_key)):
+            if name not in self.feature_to_index:
+                raise KeyError(f"{required_feature} feature '{name}' is not part of hit_features: {self.hit_features}")
+
+        self.label_key = label_key
+        self.energy_key = energy_key
+        self.max_points = max_points
+        self.scintillation_key = scintillation_key
+        self.cherenkov_key = cherenkov_key
+        self.depth_key = depth_key
+        self.time_key = time_key
+        self.summary_fn = summary_fn or self._default_summary
+        self.cache_file_handles = cache_file_handles
+
+        self._file_handles: MutableMapping[int, h5py.File] = {}
+        self._indices: List[Tuple[int, int]] = []
+
+        if class_names is not None:
+            self.classes: Tuple[str, ...] = tuple(class_names)
+        else:
+            self.classes = self._discover_classes()
+        self.class_to_index: Mapping[str, int] = {name: i for i, name in enumerate(self.classes)}
+
+        self._build_index()
+
+    # ------------------------------------------------------------------
+    # Dataset protocol implementation
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._indices)
+
+    def __getitem__(self, index: int) -> EventRecord:
+        file_id, event_id = self._indices[index]
+        handle = self._get_handle(file_id)
+
+        hits = [np.asarray(handle[feature][event_id], dtype=np.float32) for feature in self.hit_features]
+        points = np.stack(hits, axis=-1)
+        if self.max_points is not None and points.shape[0] > self.max_points:
+            rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
+            choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
+            points = points[choice]
+
+        summary = self.summary_fn(points, self.feature_to_index)
+        label_value = handle[self.label_key][event_id]
+        label_name = _decode_label(label_value)
+        if label_name not in self.class_to_index:
+            raise KeyError(f"Encountered label '{label_name}' that is not part of the class map {self.class_to_index}")
+        label = self.class_to_index[label_name]
+        energy = np.asarray(handle[self.energy_key][event_id], dtype=np.float32)
+        energy = np.atleast_1d(energy)
+
+        return EventRecord(
+            points=torch.from_numpy(points),
+            summary=torch.from_numpy(summary.astype(np.float32)),
+            label=label,
+            energy=torch.from_numpy(energy),
+            event_id=(file_id, event_id),
+        )
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+    def _discover_classes(self) -> Tuple[str, ...]:
+        labels: List[str] = []
+        for file_path in self.files:
+            with h5py.File(file_path, "r") as handle:
+                data = handle[self.label_key][:]
+                decoded = [_decode_label(value) for value in data]
+                labels.extend(decoded)
+        unique_labels = sorted(set(labels))
+        return tuple(unique_labels)
+
+    def _build_index(self) -> None:
+        self._indices.clear()
+        for file_id, file_path in enumerate(self.files):
+            with h5py.File(file_path, "r") as handle:
+                num_events = len(handle[self.label_key])
+            self._indices.extend((file_id, event_id) for event_id in range(num_events))
+
+    def _get_handle(self, file_id: int) -> h5py.File:
+        if not self.cache_file_handles:
+            return h5py.File(self.files[file_id], "r")
+        if file_id not in self._file_handles:
+            self._file_handles[file_id] = h5py.File(self.files[file_id], "r")
+        return self._file_handles[file_id]
+
+    def close(self) -> None:
+        for handle in self._file_handles.values():
+            handle.close()
+        self._file_handles.clear()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Summary feature engineering
+    # ------------------------------------------------------------------
+    def _default_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+        """Compute physics-motivated summary features for one event."""
+
+        s = points[:, index_map[self.scintillation_key]]
+        c = points[:, index_map[self.cherenkov_key]]
+        total = s + c
+        s_sum = float(np.sum(s))
+        c_sum = float(np.sum(c))
+        total_sum = float(np.sum(total))
+        ratio = float(c_sum / (s_sum + 1e-6))
+        s_minus_c = float(s_sum - c_sum)
+
+        stats: List[float] = [s_sum, c_sum, total_sum, ratio, s_minus_c]
+
+        if self.depth_key and self.depth_key in index_map:
+            z = points[:, index_map[self.depth_key]]
+            if np.sum(total) > 0:
+                depth_mean = float(np.average(z, weights=total))
+                depth_std = float(np.sqrt(np.average((z - depth_mean) ** 2, weights=total)))
+            else:
+                depth_mean = float(np.mean(z))
+                depth_std = float(np.std(z))
+            stats.extend([depth_mean, depth_std])
+        else:
+            stats.extend([0.0, 0.0])
+
+        if self.time_key and self.time_key in index_map:
+            t = points[:, index_map[self.time_key]]
+            if np.sum(total) > 0:
+                time_mean = float(np.average(t, weights=total))
+            else:
+                time_mean = float(np.mean(t))
+            stats.append(time_mean)
+        else:
+            stats.append(0.0)
+
+        return np.asarray(stats, dtype=np.float32)
+
+
+def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
+    """Custom ``DataLoader`` collation for variable-length point clouds."""
+
+    if len(batch) == 0:
+        raise ValueError("Cannot collate an empty batch")
+
+    max_hits = max(record.points.shape[0] for record in batch)
+    feature_dim = batch[0].points.shape[1]
+    batch_size = len(batch)
+
+    points = torch.zeros(batch_size, max_hits, feature_dim, dtype=batch[0].points.dtype)
+    mask = torch.zeros(batch_size, max_hits, dtype=torch.bool)
+    summary = torch.stack([record.summary for record in batch], dim=0)
+    labels = torch.tensor([record.label for record in batch], dtype=torch.long)
+    energy = torch.stack([record.energy for record in batch], dim=0).squeeze(-1)
+    event_id = torch.tensor([record.event_id for record in batch], dtype=torch.long)
+
+    for i, record in enumerate(batch):
+        num_hits = record.points.shape[0]
+        points[i, :num_hits] = record.points
+        mask[i, :num_hits] = True
+
+    return {
+        "points": points,
+        "mask": mask,
+        "summary": summary,
+        "labels": labels,
+        "energy": energy,
+        "event_id": event_id,
+    }
+
+
+__all__ = ["DualReadoutEventDataset", "collate_events", "EventRecord"]
