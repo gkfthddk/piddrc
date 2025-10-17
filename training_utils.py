@@ -9,6 +9,21 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from pm import re_namedtuple
 
 class Trainer:
+    @staticmethod
+    def _split_batch(batch):
+        if not isinstance(batch, (list, tuple)):
+            raise TypeError(f"Expected batch to be a list or tuple but got {type(batch)!r}")
+
+        if len(batch) == 5:
+            X0, X1, X2, Y1, Y2 = batch
+            origin = None
+        elif len(batch) == 6:
+            X0, X1, X2, Y1, Y2, origin = batch
+        else:
+            raise ValueError(f"Unexpected batch size {len(batch)}. Expected 5 (train/val) or 6 (test) elements.")
+
+        return X0, X1, X2, Y1, Y2, origin
+
     class Metric:
         def __init__(self, name):
             self.name = name
@@ -60,7 +75,8 @@ class Trainer:
         best_loss = 30
         early_stop = 0
         check = 0
-        X0, X1, X2, Y1, Y2, _ = train_loader.dataset[0]
+        sample = train_loader.dataset[0]
+        X0, X1, X2, Y1, Y2, _ = self._split_batch(sample)
         print("X0", X0.shape, "X1", X1.shape, "X2", X2.shape)
         inputs0 = th.empty(self.model_wrapper.batch_size, X0.shape[0], X0.shape[1], device='cuda')
         inputs1 = th.empty(self.model_wrapper.batch_size, X1.shape[0], X1.shape[1], device='cuda')
@@ -75,7 +91,8 @@ class Trainer:
                 bar = tqdm.tqdm(total=len(train_loader), nrows=2, leave=val_loader is None)
             self.model_wrapper.net.train()
             tick = 0
-            for X0, X1, X2, Y1, Y2, _ in train_loader:
+            for batch in train_loader:
+                X0, X1, X2, Y1, Y2, _ = self._split_batch(batch)
                 inputs0.copy_(X0, non_blocking=True)
                 inputs1.copy_(X1, non_blocking=True)
                 inputs2.copy_(X2, non_blocking=True)
@@ -137,7 +154,8 @@ class Trainer:
                 th.set_grad_enabled(False)
                 tick = 0
 
-                for X0, X1, X2, Y1, Y2, _ in val_loader:
+                for batch in val_loader:
+                    X0, X1, X2, Y1, Y2, _ = self._split_batch(batch)
                     X0 = X0.to("cuda", non_blocking=True)
                     X1 = X1.to("cuda", non_blocking=True)
                     X2 = X2.to("cuda", non_blocking=True)
@@ -178,7 +196,10 @@ class Trainer:
         th.set_grad_enabled(False)
         self.model_wrapper.net.eval()
         with h5py.File(f'save/{self.name}_best.h5py', 'w') as hf:
-            X0, X1, X2, Y1, Y2, origin = test_loader.dataset[0]
+            sample = test_loader.dataset[0]
+            X0, X1, X2, Y1, Y2, origin = self._split_batch(sample)
+            if origin is None:
+                raise ValueError("Test loader batch is expected to include origin information.")
             test_Y1 = hf.create_dataset("test_Y1", shape=(len(test_loader.dataset), Y1.shape[0]), dtype='float32')
             test_Y2 = hf.create_dataset("test_Y2", shape=(len(test_loader.dataset), Y2.shape[0]), dtype='float32')
             test_O = hf.create_dataset("test_O", shape=(len(test_loader.dataset), origin.shape[0]), dtype='int32')
@@ -189,7 +210,10 @@ class Trainer:
                 bar = tqdm.tqdm(total=len(test_loader), nrows=2)
             test_metric = self.Metric("test")
             n_t = 0
-            for X0, X1, X2, Y1, Y2, origin in test_loader:
+            for batch in test_loader:
+                X0, X1, X2, Y1, Y2, origin = self._split_batch(batch)
+                if origin is None:
+                    raise ValueError("Test loader batch is expected to include origin information.")
                 test_O[n_t:n_t + len(X1)] = origin
                 test_Y1[n_t:n_t + len(X1)] = Y1
                 test_Y2[n_t:n_t + len(X1)] = Y2[:]
