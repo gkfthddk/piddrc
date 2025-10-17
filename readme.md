@@ -3,7 +3,7 @@
 This repository provides reusable building blocks to study particle
 identification (PID) and energy reconstruction with dual-readout
 calorimeter simulations.  The code is intentionally modular so that you
-can experiment with different model families (MLP, PointNet-style and
+can experiment with different model families (MLP, masked point-set and
 Mamba-inspired networks) on both simulated and test-beam data.
 
 ## Key Components
@@ -12,8 +12,8 @@ Mamba-inspired networks) on both simulated and test-beam data.
 | --- | --- |
 | `piddrc.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
 | `piddrc.models.mlp.SummaryMLP` | Simple baseline operating on engineered S/C summary statistics. |
-| `piddrc.models.pointnet.PointNetModel` | Lightweight PointNet backbone with multi-task (PID + energy) head. |
-| `piddrc.models.pointmamba.PointMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
+| `piddrc.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with multi-task (PID + energy) head. |
+| `piddrc.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
 | `piddrc.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
 
 All models produce three outputs:
@@ -47,10 +47,10 @@ All models produce three outputs:
    ```python
    import torch
    from piddrc.engine import Trainer, TrainingConfig
-   from piddrc.models.pointnet import PointNetModel
+   from piddrc.models.pointset_mlp import PointSetMLP
 
    sample = dataset[0]
-   model = PointNetModel(
+   model = PointSetMLP(
        in_channels=len(dataset.hit_features),
        summary_dim=sample.summary.numel(),
        num_classes=len(dataset.classes),

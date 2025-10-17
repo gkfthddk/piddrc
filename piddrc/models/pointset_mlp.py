@@ -1,4 +1,4 @@
-"""PointNet-style architecture for dual-readout calorimeter hits."""
+"""Simple masked point-set MLP for dual-readout calorimeter hits."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from torch import nn
 from .base import MaskedMaxMeanPool, ModelOutputs, MultiTaskHead, SummaryProjector
 
 
-class PointNetBackbone(nn.Module):
-    """Lightweight PointNet-style feature extractor."""
+class PointSetMLPEncoder(nn.Module):
+    """Lightweight point-set feature extractor built from MLP blocks."""
 
     def __init__(self, in_channels: int, hidden_channels: Sequence[int] = (64, 128, 256)) -> None:
         super().__init__()
@@ -28,8 +28,8 @@ class PointNetBackbone(nn.Module):
         return self.mlp(points)
 
 
-class PointNetModel(nn.Module):
-    """PointNet baseline with multi-task prediction head."""
+class PointSetMLP(nn.Module):
+    """Point-set encoder with masked pooling and multi-task prediction head."""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class PointNetModel(nn.Module):
         use_uncertainty: bool = True,
     ) -> None:
         super().__init__()
-        self.backbone = PointNetBackbone(in_channels, backbone_channels)
+        self.backbone = PointSetMLPEncoder(in_channels, backbone_channels)
         self.pool = MaskedMaxMeanPool(backbone_channels[-1])
         self.summary_proj = SummaryProjector(summary_dim, backbone_channels[-1], enabled=use_summary)
         feature_dim = self.pool.output_dim + self.summary_proj.output_dim
@@ -67,4 +67,4 @@ class PointNetModel(nn.Module):
         return self.head(features)
 
 
-__all__ = ["PointNetModel"]
+__all__ = ["PointSetMLP"]

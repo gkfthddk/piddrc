@@ -11,8 +11,8 @@ from torch.utils.data import DataLoader
 from piddrc.data import DualReadoutEventDataset, collate_events
 from piddrc.engine import Trainer, TrainingConfig
 from piddrc.models.mlp import SummaryMLP
-from piddrc.models.pointnet import PointNetModel
-from piddrc.models.pointmamba import PointMamba
+from piddrc.models.pointset_mlp import PointSetMLP
+from piddrc.models.pointset_mamba import PointSetMamba
 
 
 def _create_dummy_file(path: Path, num_events: int = 8, num_hits: int = 32) -> None:
@@ -56,13 +56,13 @@ def test_collate_and_models(tmp_path):
     outputs = mlp(batch)
     assert outputs.logits.shape == (4, num_classes)
 
-    pointnet = PointNetModel(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
-    outputs = pointnet(batch)
+    point_mlp = PointSetMLP(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
+    outputs = point_mlp(batch)
     assert outputs.energy.shape == (4,)
 
     if importlib.util.find_spec("mamba_ssm") is not None:
-        pointmamba = PointMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
-        outputs = pointmamba(batch)
+        point_mamba = PointSetMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
+        outputs = point_mamba(batch)
         assert outputs.logits.shape == (4, num_classes)
 
 
@@ -72,7 +72,7 @@ def test_trainer_step(tmp_path):
     batch = next(iter(loader))
     summary_dim = batch["summary"].shape[-1]
     num_classes = len(dataset.classes)
-    model = PointNetModel(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
+    model = PointSetMLP(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     trainer = Trainer(model, optimizer, device=torch.device("cpu"), config=TrainingConfig(epochs=1, log_every=1, use_amp=False))
     history = trainer.fit(loader)

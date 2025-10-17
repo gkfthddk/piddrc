@@ -1,4 +1,4 @@
-"""Sequence model powered by the official Mamba selective-state layer."""
+"""Point-set sequence model powered by the official Mamba selective-state layer."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class MambaBlock(nn.Module):
         super().__init__()
         if Mamba is None:
             raise ImportError(
-                "PointMamba requires the optional dependency 'mamba-ssm'. "
+                "PointSetMamba requires the optional dependency 'mamba-ssm'. "
                 "Install it with `pip install mamba-ssm`."
             )
         self.norm = nn.LayerNorm(dim)
@@ -50,8 +50,8 @@ class MambaBlock(nn.Module):
         return residual + x
 
 
-class PointMamba(nn.Module):
-    """Point-based architecture built on stacked Mamba blocks."""
+class PointSetMamba(nn.Module):
+    """Point-set architecture built on stacked Mamba blocks."""
 
     def __init__(
         self,
@@ -106,4 +106,4 @@ class PointMamba(nn.Module):
         return self.head(features)
 
 
-__all__ = ["PointMamba"]
+__all__ = ["PointSetMamba"]
