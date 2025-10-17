@@ -13,6 +13,7 @@ from piddrc.engine import Trainer, TrainingConfig
 from piddrc.models.mlp import SummaryMLP
 from piddrc.models.pointset_mlp import PointSetMLP
 from piddrc.models.pointset_mamba import PointSetMamba
+from piddrc.models.pointset_transformer import PointSetTransformer
 
 
 def _create_dummy_file(path: Path, num_events: int = 8, num_hits: int = 32) -> None:
@@ -59,6 +60,16 @@ def test_collate_and_models(tmp_path):
     point_mlp = PointSetMLP(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
     outputs = point_mlp(batch)
     assert outputs.energy.shape == (4,)
+
+    transformer = PointSetTransformer(
+        in_channels=batch["points"].shape[-1],
+        summary_dim=summary_dim,
+        num_classes=num_classes,
+        depth=2,
+        num_heads=4,
+    )
+    outputs = transformer(batch)
+    assert outputs.logits.shape == (4, num_classes)
 
     if importlib.util.find_spec("mamba_ssm") is not None:
         point_mamba = PointSetMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)

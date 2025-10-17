@@ -13,6 +13,7 @@ Mamba-inspired networks) on both simulated and test-beam data.
 | `piddrc.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
 | `piddrc.models.mlp.SummaryMLP` | Simple baseline operating on engineered S/C summary statistics. |
 | `piddrc.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with multi-task (PID + energy) head. |
+| `piddrc.models.pointset_transformer.PointSetTransformer` | Transformer encoder for masked point sets with global pooling head. |
 | `piddrc.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
 | `piddrc.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
 
