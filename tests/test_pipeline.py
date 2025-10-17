@@ -1,3 +1,4 @@
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -59,9 +60,10 @@ def test_collate_and_models(tmp_path):
     outputs = pointnet(batch)
     assert outputs.energy.shape == (4,)
 
-    pointmamba = PointMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
-    outputs = pointmamba(batch)
-    assert outputs.logits.shape == (4, num_classes)
+    if importlib.util.find_spec("mamba_ssm") is not None:
+        pointmamba = PointMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
+        outputs = pointmamba(batch)
+        assert outputs.logits.shape == (4, num_classes)
 
 
 def test_trainer_step(tmp_path):

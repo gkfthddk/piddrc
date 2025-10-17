@@ -1,7 +1,9 @@
-"""Sequence model inspired by Mamba for point-cloud processing."""
+"""Sequence model powered by the official Mamba selective-state layer."""
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 from typing import Sequence
 
 import torch
@@ -9,35 +11,47 @@ from torch import nn
 
 from .base import ModelOutputs, MultiTaskHead
 
+_MAMBA_SPEC = importlib.util.find_spec("mamba_ssm")
+if _MAMBA_SPEC is not None:
+    _MAMBA_MODULE = importlib.import_module("mamba_ssm")
+    Mamba = getattr(_MAMBA_MODULE, "Mamba")
+else:
+    Mamba = None
 
-class ResidualBlock(nn.Module):
-    """Gated residual block approximating Mamba-style mixing."""
 
-    def __init__(self, dim: int, *, expansion: int = 4, dropout: float = 0.1) -> None:
+class MambaBlock(nn.Module):
+    """Wrapper around :class:`mamba_ssm.Mamba` with masking support."""
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        hidden = dim * expansion
+        if Mamba is None:
+            raise ImportError(
+                "PointMamba requires the optional dependency 'mamba-ssm'. "
+                "Install it with `pip install mamba-ssm`."
+            )
         self.norm = nn.LayerNorm(dim)
-        self.conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.linear_f = nn.Linear(dim, hidden)
-        self.linear_g = nn.Linear(dim, hidden)
-        self.proj = nn.Linear(hidden, dim)
+        self.mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         residual = x
         x = self.norm(x)
-        conv = self.conv(x.transpose(1, 2)).transpose(1, 2)
-        f = torch.tanh(self.linear_f(x))
-        g = torch.sigmoid(self.linear_g(conv))
-        mixed = f * g
-        out = self.proj(mixed)
-        out = self.dropout(out)
-        out = out * mask.unsqueeze(-1).float()
-        return residual + out
+        x = self.mamba(x)
+        x = self.dropout(x)
+        x = x * mask.unsqueeze(-1).float()
+        return residual + x
 
 
 class PointMamba(nn.Module):
-    """Point-based architecture using gated mixing blocks."""
+    """Point-based architecture built on stacked Mamba blocks."""
 
     def __init__(
         self,
@@ -54,7 +68,18 @@ class PointMamba(nn.Module):
     ) -> None:
         super().__init__()
         self.input_proj = nn.Linear(in_channels, hidden_dim)
-        self.blocks = nn.ModuleList([ResidualBlock(hidden_dim, dropout=dropout) for _ in range(depth)])
+        self.blocks = nn.ModuleList(
+            [
+                MambaBlock(
+                    hidden_dim,
+                    d_state=hidden_dim // 2,
+                    d_conv=4,
+                    expand=2,
+                    dropout=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
         self.norm = nn.LayerNorm(hidden_dim)
         feature_dim = hidden_dim * 2
         if use_summary:
