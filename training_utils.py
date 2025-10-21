@@ -253,9 +253,12 @@ class Trainer:
             'model_config': self.model_config,
         }, f'save/ckpt-{self.name}-best.pth')
 
-    def load_checkpoint(self):
-        tl = th.load(f'save/ckpt-{self.name}-best.pth')
-        self.model_wrapper.net.load_state_dict(tl['net'])
+    @staticmethod
+    def load_checkpoint(name, model_wrapper=None):
+        """Loads checkpoint. If model_wrapper is provided, it loads the network state dict."""
+        tl = th.load(f'save/ckpt-{name}-best.pth', map_location=th.device('cpu'))
+        if model_wrapper is not None:
+            model_wrapper.net.load_state_dict(tl['net'])
         print("best loss", tl['best_loss'])
         return tl['data_config'], tl['model_config']
 

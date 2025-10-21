@@ -74,7 +74,9 @@ if __name__ == '__main__':
     name = args.name
 
     if args.eval:
-        data_config, model_config = Trainer.load_config_from_checkpoint(name)
+        data_config, model_config = Trainer.load_checkpoint(name)
+        data_cfg = re_namedtuple(yaml.safe_load(data_config))
+        cand = data_cfg.input1.cand
     else:
         if "{c}" in args.cand:
             cand = [args.cand.replace("{c}", c) for c in cands]
@@ -204,7 +206,6 @@ if __name__ == '__main__':
 
         train_loader = th.utils.data.DataLoader(train_dataset, batch_size=data_cfg.input1.batch_size, drop_last=True, pin_memory=True, shuffle=True, num_workers=len(cand))
         val_loader = th.utils.data.DataLoader(val_dataset, batch_size=data_cfg.input1.batch_size, num_workers=len(cand))
-        print(f"balance{train_dataset.dataset1.balance} train {train_dataset.dataset1.begin}-{train_dataset.dataset1.end} validation {val_dataset.dataset1.begin}-{val_dataset.dataset1.end} ")
         print(f"train {len(train_dataset)} validation {len(val_dataset)}")
 
         trainer.train(train_loader, val_loader, num_epoch=args.epoch)
@@ -213,6 +214,5 @@ if __name__ == '__main__':
 
     test_dataset = CombinedDataset(cand, is_test=True, path=args.path, balance=balance, config=data_cfg)
     test_loader = th.utils.data.DataLoader(test_dataset, batch_size=data_cfg.input1.batch_size, num_workers=len(cand), shuffle=True)
-    print(f"balance{test_dataset.dataset1.balance} test {test_dataset.dataset1.begin}-{test_dataset.dataset1.end} {len(test_dataset)}")
     trainer.test(test_loader)
     print("duration", datetime.datetime.now() - start_time)
