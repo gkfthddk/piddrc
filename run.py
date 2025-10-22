@@ -13,7 +13,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -31,7 +31,23 @@ MODEL_REGISTRY = {
 }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    gpus_parser = argparse.ArgumentParser(add_help=False)
+    gpus_parser.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated list of CUDA device indices to expose via "
+            "CUDA_VISIBLE_DEVICES"
+        ),
+    )
+
+    gpus_args, _ = gpus_parser.parse_known_args(argv)
+    if gpus_args.gpus is not None:
+        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpus_args.gpus
+
     parser = argparse.ArgumentParser(description="Train dual-readout point-set models")
 
     io_group = parser.add_argument_group("Data")
@@ -159,7 +175,7 @@ def parse_args() -> argparse.Namespace:
     misc_group.add_argument(
         "--gpus",
         type=str,
-        default=None,
+        default=gpus_args.gpus,
         help=(
             "Optional comma-separated list of CUDA device indices to expose via "
             "CUDA_VISIBLE_DEVICES"
@@ -183,7 +199,7 @@ def parse_args() -> argparse.Namespace:
         help="Skip training and only run evaluation using the provided checkpoint",
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def build_datasets(args: argparse.Namespace) -> Tuple[DualReadoutEventDataset, DualReadoutEventDataset | None]:
@@ -319,10 +335,6 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 def main() -> None:
     args = parse_args()
-
-    if args.gpus is not None:
-        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
 
     device = torch.device(args.device)
 
