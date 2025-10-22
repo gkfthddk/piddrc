@@ -1,5 +1,6 @@
 """Integration tests that exercise the event pipeline with real dependencies."""
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
         "Install them via 'pip install -r requirements.txt' and re-run pytest."
     ) from exc
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from pid.data import DualReadoutEventDataset, collate_events
 from pid.engine import Trainer, TrainingConfig
@@ -24,6 +25,8 @@ from pid.models.mlp import SummaryMLP
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_transformer import PointSetTransformer
+
+import run
 
 
 HIT_FEATURES = (
@@ -109,3 +112,43 @@ def test_trainer_step(pipeline_dataset):
     metrics = history["train"][0]
     assert "loss" in metrics
     assert "accuracy" in metrics
+
+
+def test_build_datasets_auto_split(dummy_h5):
+    args = argparse.Namespace(
+        train_files=[dummy_h5],
+        val_files=None,
+        test_files=None,
+        hit_features=HIT_FEATURES,
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        max_points=16,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        split_seed=42,
+    )
+
+    base_dataset, train_dataset, val_dataset, test_dataset = run.build_datasets(args)
+
+    assert isinstance(base_dataset, DualReadoutEventDataset)
+    assert isinstance(train_dataset, Subset)
+    assert isinstance(val_dataset, Subset)
+    assert isinstance(test_dataset, Subset)
+
+    total_length = len(train_dataset) + len(val_dataset) + len(test_dataset)
+    assert total_length == len(base_dataset)
+
+    train_indices = {int(idx) for idx in train_dataset.indices}
+    val_indices = {int(idx) for idx in val_dataset.indices}
+    test_indices = {int(idx) for idx in test_dataset.indices}
+
+    assert train_indices.isdisjoint(val_indices)
+    assert train_indices.isdisjoint(test_indices)
+    assert val_indices.isdisjoint(test_indices)
+
+    # The split should be deterministic for a given seed
+    _, train_dataset_b, val_dataset_b, test_dataset_b = run.build_datasets(args)
+    assert isinstance(train_dataset_b, Subset)
+    assert train_dataset.indices == train_dataset_b.indices
+    assert val_dataset.indices == val_dataset_b.indices
+    assert test_dataset.indices == test_dataset_b.indices
