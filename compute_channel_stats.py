@@ -21,12 +21,110 @@ from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequ
 
 import h5py
 import numpy as np
-import yaml
+
+try:  # pragma: no cover - optional dependency
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    yaml = None
+
+try:  # pragma: no cover - optional dependency
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    tqdm = None
 
 
 DEFAULT_SAMPLE_SIZE = 200_000
 DEFAULT_PERCENTILES = (0.5, 0.9, 0.99)
 DEFAULT_CHUNK_SIZE = 512
+DEFAULT_DATA_DIR = "h5s"
+DEFAULT_DATASETS = (
+    "e-_1-100GeV",
+    "gamma_1-100GeV",
+    "pi0_1-100GeV",
+    "pi+_1-100GeV",
+)
+
+_BASE_CHANNELS = [
+    "C_amp",
+    "C_raw",
+    "DRcalo3dHits.amplitude",
+    "DRcalo3dHits.amplitude_sum",
+    "DRcalo3dHits.cellID",
+    "DRcalo3dHits.position.x",
+    "DRcalo3dHits.position.y",
+    "DRcalo3dHits.position.z",
+    "DRcalo3dHits.time",
+    "DRcalo3dHits.time_end",
+    "DRcalo3dHits.type",
+    "DRcalo2dHits.amplitude",
+    "DRcalo2dHits.cellID",
+    "DRcalo2dHits.position.x",
+    "DRcalo2dHits.position.y",
+    "DRcalo2dHits.position.z",
+    "DRcalo2dHits.type",
+    "Reco3dHits_C.amplitude",
+    "Reco3dHits_C.position.x",
+    "Reco3dHits_C.position.y",
+    "Reco3dHits_C.position.z",
+    "Reco3dHits_S.amplitude",
+    "Reco3dHits_S.position.x",
+    "Reco3dHits_S.position.y",
+    "Reco3dHits_S.position.z",
+    "E_dep",
+    "E_gen",
+    "E_leak",
+    "GenParticles.momentum.phi",
+    "GenParticles.momentum.theta",
+    "seed",
+    "S_amp",
+    "S_raw",
+    "angle2",
+]
+
+_POOL_CHANNEL_TEMPLATES = (
+    "Reco3dHits{pool}_C.amplitude",
+    "Reco3dHits{pool}_C.position.x",
+    "Reco3dHits{pool}_C.position.y",
+    "Reco3dHits{pool}_C.position.z",
+    "Reco3dHits{pool}_S.amplitude",
+    "Reco3dHits{pool}_S.position.x",
+    "Reco3dHits{pool}_S.position.y",
+    "Reco3dHits{pool}_S.position.z",
+    "DRcalo3dHits{pool}.amplitude",
+    "DRcalo3dHits{pool}.amplitude_sum",
+    "DRcalo3dHits{pool}.cellID",
+    "DRcalo3dHits{pool}.position.x",
+    "DRcalo3dHits{pool}.position.y",
+    "DRcalo3dHits{pool}.position.z",
+    "DRcalo3dHits{pool}.time",
+    "DRcalo3dHits{pool}.time_end",
+    "DRcalo3dHits{pool}.type",
+    "DRcalo2dHits{pool}.amplitude",
+    "DRcalo2dHits{pool}.cellID",
+    "DRcalo2dHits{pool}.position.x",
+    "DRcalo2dHits{pool}.position.y",
+    "DRcalo2dHits{pool}.position.z",
+    "DRcalo2dHits{pool}.type",
+)
+
+DEFAULT_CHANNEL_CONFIG: Mapping[str, Mapping[str, object]] = {
+    "summary": {
+        "DESCRIPTION": "Core per-event features written by toh5.py",
+        "CHANNEL": tuple(_BASE_CHANNELS),
+    }
+}
+for _pool in (4, 8, 14, 28, 56):
+    DEFAULT_CHANNEL_CONFIG[f"pool_{_pool}"] = {
+        "DESCRIPTION": f"Pooled reconstruction features with pool size {_pool}",
+        "CHANNEL": tuple(template.format(pool=_pool) for template in _POOL_CHANNEL_TEMPLATES),
+    }
+del _pool
+
+_default_channel_sequence: List[str] = []
+for _config in DEFAULT_CHANNEL_CONFIG.values():
+    _default_channel_sequence.extend(_config["CHANNEL"])
+DEFAULT_CHANNELS = tuple(dict.fromkeys(_default_channel_sequence))
+del _default_channel_sequence, _config
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -34,17 +132,18 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         description=(
             "Scan HDF5 datasets and compute summary statistics for configured "
             "detector channels."
-        )
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--data-dir",
-        default="h5s",
+        default=DEFAULT_DATA_DIR,
         help="Directory that contains <dataset>.h5py files",
     )
     parser.add_argument(
         "--datasets",
         nargs="+",
-        required=True,
+        default=DEFAULT_DATASETS,
         help=(
             "Dataset names (without .h5py extension) to include in the scan. "
             "Each name will be resolved against --data-dir."
@@ -71,16 +170,21 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--channels",
         nargs="*",
-        default=(
-            "C_amp",
-            "S_amp",
-            "E_gen",
-            ),
+        default=DEFAULT_CHANNELS,
         help=(
             "Explicit dataset names to include in addition to the configured "
             "channel groups.  When omitted and no configuration module is "
             "provided, the script will attempt to discover channels by "
             "inspecting the input files."
+        ),
+    )
+    parser.add_argument(
+        "--default-config",
+        action="store_true",
+        help=(
+            "Use the built-in channel configuration derived from toh5.py. "
+            "This is automatically enabled when no configuration module is "
+            "provided or cannot be imported."
         ),
     )
     parser.add_argument(
@@ -202,25 +306,30 @@ class StreamingStats:
 
 def _load_channel_config(
     module_name: Optional[str],
+    use_default: bool,
 ) -> Optional[Mapping[str, Mapping[str, object]]]:
     if module_name is None:
-        return None
+        return DEFAULT_CHANNEL_CONFIG if use_default else None
 
     try:
         module = import_module(module_name)
     except ModuleNotFoundError:
         warnings.warn(
-            "Channel configuration module '%s' could not be imported; proceeding "
-            "without predefined channel groups." % module_name
+            "Channel configuration module '%s' could not be imported; "
+            "falling back to the built-in defaults." % module_name
         )
-        return None
-    
+        return DEFAULT_CHANNEL_CONFIG
+
     if not hasattr(module, "get_channel_config"):
         raise AttributeError(
             f"Module '{module_name}' does not define get_channel_config()."
         )
 
     channel_config, _, _ = module.get_channel_config()
+    if use_default:
+        merged: Dict[str, Mapping[str, object]] = dict(DEFAULT_CHANNEL_CONFIG)
+        merged.update(channel_config)
+        return merged
     return channel_config
 
 
@@ -307,6 +416,20 @@ def _iter_batches(dataset: h5py.Dataset, chunk_size: int) -> Iterable[np.ndarray
         yield dataset[start:end]
 
 
+def _progress(iterable: Iterable, **kwargs):
+    if tqdm is None:
+        for item in iterable:
+            yield item
+        return
+
+    progress_bar = tqdm(iterable, **kwargs)
+    try:
+        for item in progress_bar:
+            yield item
+    finally:
+        progress_bar.close()
+
+
 def scan_datasets(
     data_dir: str,
     dataset_names: Sequence[str],
@@ -320,14 +443,21 @@ def scan_datasets(
         for channel in channels
     }
 
-    for name in dataset_names:
+    dataset_iter = _progress(dataset_names, desc="Datasets", unit="file")
+    for name in dataset_iter:
         path = os.path.join(data_dir, f"{name}.h5py")
         if not os.path.exists(path):
             warnings.warn(f"File not found: {path}. Skipping.")
             continue
 
         with h5py.File(path, "r") as handle:
-            for channel in channels:
+            channel_iter = _progress(
+                channels,
+                desc=f"{name} channels",
+                unit="channel",
+                leave=False,
+            )
+            for channel in channel_iter:
                 if channel not in handle:
                     warnings.warn(
                         f"Dataset '{channel}' not found in file {path}. Skipping this channel."
@@ -341,12 +471,16 @@ def scan_datasets(
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:
     if output is None:
-        yaml.safe_dump(
-            results,
-            stream=sys.stdout,
-            sort_keys=False,
-            default_flow_style=False,
-        )
+        if yaml is not None:
+            yaml.safe_dump(
+                results,
+                stream=sys.stdout,
+                sort_keys=False,
+                default_flow_style=False,
+            )
+        else:
+            json.dump(results, sys.stdout, indent=2)
+            sys.stdout.write("\n")
         return
 
     os.makedirs(os.path.dirname(output), exist_ok=True) if os.path.dirname(output) else None
@@ -356,6 +490,10 @@ def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None
         with open(output, "w", encoding="utf-8") as fh:
             json.dump(results, fh, indent=2)
     elif ext in {".yml", ".yaml"}:
+        if yaml is None:
+            raise RuntimeError(
+                "PyYAML is required to write YAML output. Install it or choose a .json file."
+            )
         with open(output, "w", encoding="utf-8") as fh:
             yaml.safe_dump(results, fh, sort_keys=False, default_flow_style=False)
     else:
@@ -379,7 +517,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         module_name = None
 
-    channel_config = _load_channel_config(module_name)
+    use_default_config = args.default_config or module_name is None
+    channel_config = _load_channel_config(module_name, use_default=use_default_config)
 
     channels = _collect_channels(
         channel_config,
