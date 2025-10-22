@@ -71,7 +71,7 @@ All models produce three outputs:
 
 ### Inspecting model architectures
 
-The training script can print a [`torchsummary`](https://github.com/sksq96/pytorch-summary)
+The training script can print a [`torchinfo`](https://github.com/tyleryep/torchinfo)
 overview of the selected architecture using a representative batch drawn
 from the training data. Enable it via the `--print_model_summary` flag:
 

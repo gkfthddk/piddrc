@@ -299,11 +299,11 @@ def maybe_print_model_summary(
         return
 
     try:
-        from torchsummary import summary
+        from torchinfo import summary
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
         raise ModuleNotFoundError(
-            "The torchsummary package is required to print the model overview. "
-            "Install it via 'pip install torchsummary'."
+            "The torchinfo package is required to print the model overview. "
+            "Install it via 'pip install torchinfo'."
         ) from exc
 
     sample_batch = next(iter(train_loader))
