@@ -57,24 +57,81 @@ class MultiTaskHead(nn.Module):
 
 
 class MaskedMaxMeanPool(nn.Module):
-    """Combine masked global max and mean pooling for variable-length sets."""
+    """Combine masked global max, mean and multi-head attention pooling."""
 
-    def __init__(self, feature_dim: int) -> None:
+    def __init__(
+        self,
+        feature_dim: int,
+        *,
+        use_attention: bool = True,
+        attention_heads: int = 4,
+        attention_queries: int = 1,
+    ) -> None:
         super().__init__()
         self.feature_dim = feature_dim
+        self.use_attention = use_attention
+        if use_attention:
+            if feature_dim % attention_heads != 0:
+                raise ValueError("feature_dim must be divisible by attention_heads")
+            self.attention = nn.MultiheadAttention(
+                embed_dim=feature_dim,
+                num_heads=attention_heads,
+                batch_first=True,
+            )
+            self.num_attention_queries = attention_queries
+            query = torch.randn(attention_queries, feature_dim)
+            nn.init.xavier_uniform_(query)
+            self.register_parameter("attention_query", nn.Parameter(query))
+            self.attn_norm = nn.LayerNorm(feature_dim)
+        else:
+            self.attention = None
+            self.num_attention_queries = 0
+            self.register_parameter("attention_query", None)
+            self.attn_norm = None
 
     @property
     def output_dim(self) -> int:
-        return self.feature_dim * 2
+        base = self.feature_dim * 2
+        if self.attention is not None:
+            base += self.feature_dim * self.num_attention_queries
+        return base
 
     def forward(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        valid = mask.unsqueeze(-1)
-        masked = features.masked_fill(~valid.bool(), float("-inf"))
+        valid = mask.bool().unsqueeze(-1)
+        masked = features.masked_fill(~valid, float("-inf"))
         global_max = masked.max(dim=1).values
         global_max[~torch.isfinite(global_max)] = 0.0
-        denom = valid.float().sum(dim=1).clamp_min(1.0)
-        mean = (features * valid.float()).sum(dim=1) / denom
-        return torch.cat([global_max, mean], dim=-1)
+
+        valid_float = valid.float()
+        denom = valid_float.sum(dim=1).clamp_min(1.0)
+        mean = (features * valid_float).sum(dim=1) / denom
+
+        pooled = [global_max, mean]
+
+        if self.attention is not None:
+            batch, _, _ = features.shape
+            attn_output = torch.zeros(
+                batch,
+                self.num_attention_queries,
+                self.feature_dim,
+                device=features.device,
+                dtype=features.dtype,
+            )
+            valid_batches = mask.any(dim=1)
+            if valid_batches.any():
+                queries = self.attention_query.unsqueeze(0).expand(batch, -1, -1)
+                attn_mask = ~mask.bool()
+                attn_input = self.attn_norm(features)
+                attn_valid, _ = self.attention(
+                    queries[valid_batches],
+                    attn_input[valid_batches],
+                    attn_input[valid_batches],
+                    key_padding_mask=attn_mask[valid_batches],
+                )
+                attn_output[valid_batches] = torch.nan_to_num(attn_valid)
+            pooled.append(attn_output.reshape(batch, -1))
+
+        return torch.cat(pooled, dim=-1)
 
 
 class SummaryProjector(nn.Module):
