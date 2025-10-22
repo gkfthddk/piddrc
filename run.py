@@ -336,7 +336,7 @@ def maybe_print_model_summary(
     model.eval()
     try:
         with torch.no_grad():
-            summary(model, input_data=(sample_batch,))
+            summary(model, input_data=(sample_batch,),col_names=("input_size", "output_size", "num_params"))
     finally:
         for handle in hook_handles:
             handle.remove()
