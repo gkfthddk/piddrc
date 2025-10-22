@@ -26,7 +26,15 @@ from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_transformer import PointSetTransformer
 
 
-HIT_FEATURES = ("x", "y", "z", "S", "C", "t")
+HIT_FEATURES = (
+            "DRcalo3dHits.amplitude_sum",
+            "DRcalo3dHits.type",
+            "DRcalo3dHits.time",
+            "DRcalo3dHits.time_end",
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+            )
 
 
 @pytest.fixture
@@ -49,12 +57,8 @@ def pipeline_dataset(dummy_h5):
     return DualReadoutEventDataset(
         [str(dummy_h5)],
         hit_features=HIT_FEATURES,
-        label_key="particle_type",
-        energy_key="true_energy",
-        scintillation_key="S",
-        cherenkov_key="C",
-        depth_key="z",
-        time_key="t",
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
         max_points=16,
     )
 
