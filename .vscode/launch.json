@@ -23,8 +23,6 @@
         "run.py",
         "submit.py",
         "toh5.py",
-        "pm.py",
-        "nh5.py"
       ]
     },
     {
