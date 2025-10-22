@@ -25,7 +25,11 @@ All models produce three outputs:
 
 ## Quick Start
 
-1. **Install dependencies** (PyTorch, h5py, numpy, scikit-learn, tqdm).
+1. **Install dependencies** using the provided requirements file:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
 2. **Create a dataset** by pointing the loader to your HDF5 files:
 
    ```python
