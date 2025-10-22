@@ -73,6 +73,8 @@ class Trainer:
         labels_list: List[torch.Tensor] = []
         energy_pred: List[torch.Tensor] = []
         energy_true: List[torch.Tensor] = []
+        log_sigma_list: List[torch.Tensor] = []
+        sigma_values: List[float] = []
 
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
@@ -97,16 +99,40 @@ class Trainer:
             labels_list.append(batch["labels"].detach().cpu())
             energy_pred.append(outputs.energy.detach().cpu())
             energy_true.append(batch["energy"].detach().cpu())
+            if outputs.log_sigma is not None:
+                log_sigma = outputs.log_sigma.detach()
+                log_sigma_list.append(log_sigma.cpu())
+                sigma_values.append(float(torch.exp(log_sigma).mean().item()))
 
             if training and step % self.config.log_every == 0:
-                iterator.set_postfix({"loss": sum(losses) / len(losses)})
+                postfix = {
+                    "loss": sum(losses) / len(losses),
+                    "reg": sum(reg_losses) / len(reg_losses),
+                }
+                if sigma_values:
+                    postfix["sigma"] = sum(sigma_values) / len(sigma_values)
+                try:
+                    auc = metrics_mod.roc_auc(torch.cat(logits_list), torch.cat(labels_list))
+                except RuntimeError:
+                    auc = None
+                if auc is not None:
+                    postfix["auc"] = auc
+                iterator.set_postfix(postfix)
 
-        metrics = self._compute_metrics(logits_list, labels_list, energy_pred, energy_true)
+        metrics = self._compute_metrics(
+            logits_list,
+            labels_list,
+            energy_pred,
+            energy_true,
+            log_sigma_list if log_sigma_list else None,
+        )
         metrics.update({
             "loss": float(sum(losses) / max(len(losses), 1)),
             "loss_cls": float(sum(cls_losses) / max(len(cls_losses), 1)),
             "loss_reg": float(sum(reg_losses) / max(len(reg_losses), 1)),
         })
+        metrics["classification_loss"] = metrics["loss_cls"]
+        metrics["regression_loss"] = metrics["loss_reg"]
         return metrics
 
     def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -131,6 +157,7 @@ class Trainer:
         labels_list: Iterable[torch.Tensor],
         energy_pred: Iterable[torch.Tensor],
         energy_true: Iterable[torch.Tensor],
+        log_sigma_list: Optional[Iterable[torch.Tensor]] = None,
     ) -> Dict[str, float]:
         logits = torch.cat(list(logits_list))
         labels = torch.cat(list(labels_list))
@@ -142,10 +169,15 @@ class Trainer:
         auc = metrics_mod.roc_auc(logits, labels)
         if auc is not None:
             metrics["roc_auc"] = auc
+            metrics["classification_auc"] = auc
         resolution = metrics_mod.energy_resolution(energy_p, energy_t)
         metrics["energy_resolution"] = resolution["resolution"]
         metrics["energy_rmse"] = resolution["rmse"]
         metrics["energy_bias"] = resolution["bias"]
+        metrics["regression_mse"] = float(torch.mean((energy_p - energy_t) ** 2).item())
+        if log_sigma_list is not None:
+            log_sigma = torch.cat(list(log_sigma_list))
+            metrics["regression_expected_sigma"] = float(torch.exp(log_sigma).mean().item())
         slope, intercept = metrics_mod.energy_linearity(energy_p, energy_t)
         metrics["linearity_slope"] = slope
         metrics["linearity_intercept"] = intercept
