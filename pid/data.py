@@ -153,9 +153,9 @@ class DualReadoutEventDataset(Dataset):
         hits = [np.asarray(handle[feature][event_id], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
         if self.max_points is not None and points.shape[0] > self.max_points:
-            rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
-            choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
-            points = points[choice]
+            #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
+            #choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
+            points = points[:self.max_points]
 
         summary = self.summary_fn(points, self.feature_to_index)
         label_value = handle[self.label_key][event_id]
