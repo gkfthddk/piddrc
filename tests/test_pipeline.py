@@ -1,12 +1,18 @@
+"""Integration tests that exercise the event pipeline with real dependencies."""
+
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
 
-h5py = pytest.importorskip("h5py")
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+np = pytest.importorskip("numpy", reason="numpy is required for pipeline integration tests")
+torch = pytest.importorskip("torch", reason="torch is required for pipeline integration tests")
+h5py = pytest.importorskip("h5py", reason="h5py is required for pipeline integration tests")
 
 from piddrc.data import DualReadoutEventDataset, collate_events
 from piddrc.engine import Trainer, TrainingConfig
@@ -16,24 +22,29 @@ from piddrc.models.pointset_mamba import PointSetMamba
 from piddrc.models.pointset_transformer import PointSetTransformer
 
 
-def _create_dummy_file(path: Path, num_events: int = 8, num_hits: int = 32) -> None:
+HIT_FEATURES = ("x", "y", "z", "S", "C", "t")
+
+
+@pytest.fixture
+def dummy_h5(tmp_path):
+    file_path = tmp_path / "dummy.h5"
     rng = np.random.default_rng(1234)
-    with h5py.File(path, "w") as f:
-        for feature in ["x", "y", "z", "S", "C", "t"]:
-            data = rng.normal(size=(num_events, num_hits)).astype(np.float32)
+    with h5py.File(file_path, "w") as f:
+        for feature in HIT_FEATURES:
+            data = rng.normal(size=(8, 32)).astype(np.float32)
             f.create_dataset(feature, data=data)
-        labels = np.array(["electron", "pion"] * (num_events // 2), dtype="S")
-        energies = rng.uniform(5, 50, size=num_events).astype(np.float32)
+        labels = np.array(["electron", "pion"] * 4, dtype="S")
+        energies = rng.uniform(5, 50, size=8).astype(np.float32)
         f.create_dataset("particle_type", data=labels)
         f.create_dataset("true_energy", data=energies)
+    return file_path
 
 
-def _build_dataset(tmp_path: Path) -> DualReadoutEventDataset:
-    file_path = tmp_path / "dummy.h5"
-    _create_dummy_file(file_path)
-    dataset = DualReadoutEventDataset(
-        [str(file_path)],
-        hit_features=("x", "y", "z", "S", "C", "t"),
+@pytest.fixture
+def pipeline_dataset(dummy_h5):
+    return DualReadoutEventDataset(
+        [str(dummy_h5)],
+        hit_features=HIT_FEATURES,
         label_key="particle_type",
         energy_key="true_energy",
         scintillation_key="S",
@@ -42,12 +53,11 @@ def _build_dataset(tmp_path: Path) -> DualReadoutEventDataset:
         time_key="t",
         max_points=16,
     )
-    return dataset
 
 
-def test_collate_and_models(tmp_path):
-    dataset = _build_dataset(tmp_path)
-    loader = DataLoader(dataset, batch_size=4, collate_fn=collate_events)
+def test_collate_and_models(pipeline_dataset):
+    dataset = pipeline_dataset
+    loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
     batch = next(iter(loader))
     assert batch["points"].shape[1] == 16
     summary_dim = batch["summary"].shape[-1]
@@ -77,9 +87,9 @@ def test_collate_and_models(tmp_path):
         assert outputs.logits.shape == (4, num_classes)
 
 
-def test_trainer_step(tmp_path):
-    dataset = _build_dataset(tmp_path)
-    loader = DataLoader(dataset, batch_size=4, collate_fn=collate_events)
+def test_trainer_step(pipeline_dataset):
+    dataset = pipeline_dataset
+    loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
     batch = next(iter(loader))
     summary_dim = batch["summary"].shape[-1]
     num_classes = len(dataset.classes)
@@ -91,4 +101,3 @@ def test_trainer_step(tmp_path):
     metrics = history["train"][0]
     assert "loss" in metrics
     assert "accuracy" in metrics
-
