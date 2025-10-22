@@ -2,8 +2,10 @@
 
 This script scans one or more HDF5 datasets and aggregates simple statistics for
 all configured channels.  The resulting maxima or high quantiles can be fed
-back into ``config.get_channel_config`` to populate ``CHANNELMAX`` with
-realistic values.
+back into ``get_channel_config`` (loaded from a configurable module) to populate
+``CHANNELMAX`` with realistic values.  When a configuration module is not
+available, you can provide channel names explicitly or allow the script to
+discover them from the input files.
 """
 from __future__ import annotations
 
@@ -14,13 +16,12 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence
+from importlib import import_module
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 import h5py
 import numpy as np
 import yaml
-
-from config import get_channel_config
 
 
 DEFAULT_SAMPLE_SIZE = 200_000
@@ -59,12 +60,23 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--config-module",
+        default="config",
+        help=(
+            "Python module that exposes get_channel_config(). Set to 'none' to "
+            "skip loading channel groups from a module. If the module cannot be "
+            "imported the script will fall back to discovery."
+        ),
+    )
+    parser.add_argument(
         "--channels",
         nargs="*",
         default=None,
         help=(
             "Explicit dataset names to include in addition to the configured "
-            "channel groups."
+            "channel groups.  When omitted and no configuration module is "
+            "provided, the script will attempt to discover channels by "
+            "inspecting the input files."
         ),
     )
     parser.add_argument(
@@ -184,25 +196,82 @@ class StreamingStats:
         }
 
 
-def _collect_channels(
-    groups: Iterable[str] | None, extra_channels: Iterable[str] | None
+def _load_channel_config(
+    module_name: Optional[str],
+) -> Optional[Mapping[str, Mapping[str, object]]]:
+    if module_name is None:
+        return None
+
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError:
+        warnings.warn(
+            "Channel configuration module '%s' could not be imported; proceeding "
+            "without predefined channel groups." % module_name
+        )
+        return None
+    
+    if not hasattr(module, "get_channel_config"):
+        raise AttributeError(
+            f"Module '{module_name}' does not define get_channel_config()."
+        )
+
+    channel_config, _, _ = module.get_channel_config()
+    return channel_config
+
+
+def _discover_channels(
+    data_dir: str, dataset_names: Sequence[str]
 ) -> List[str]:
-    channel_config, _, _ = get_channel_config()
+    """Infer channel names by inspecting the provided datasets."""
 
-    if groups is None:
-        selected_groups = channel_config.keys()
-    else:
-        missing = [name for name in groups if name not in channel_config]
-        if missing:
-            raise ValueError(
-                f"Unknown channel groups: {', '.join(missing)}. "
-                "Check config.get_channel_config()."
-            )
-        selected_groups = groups
+    discovered: List[str] = []
+    seen = set()
 
-    channels = []
-    for group in selected_groups:
-        channels.extend(channel_config[group]["CHANNEL"])
+    for name in dataset_names:
+        path = os.path.join(data_dir, f"{name}.h5py")
+        if not os.path.exists(path):
+            continue
+
+        try:
+            with h5py.File(path, "r") as handle:
+                for key in handle.keys():
+                    if key not in seen and isinstance(handle[key], h5py.Dataset):
+                        seen.add(key)
+                        discovered.append(key)
+        except OSError as exc:
+            warnings.warn(f"Failed to inspect {path}: {exc}")
+
+    return discovered
+
+
+def _collect_channels(
+    channel_config: Optional[Mapping[str, Mapping[str, object]]],
+    groups: Iterable[str] | None,
+    extra_channels: Iterable[str] | None,
+    data_dir: str,
+    dataset_names: Sequence[str],
+) -> List[str]:
+    channels: List[str] = []
+
+    if channel_config is not None:
+        if groups is None:
+            selected_groups = channel_config.keys()
+        else:
+            missing = [name for name in groups if name not in channel_config]
+            if missing:
+                raise ValueError(
+                    f"Unknown channel groups: {', '.join(missing)}. "
+                    "Check get_channel_config() in the provided module."
+                )
+            selected_groups = groups
+
+        for group in selected_groups:
+            channels.extend(channel_config[group]["CHANNEL"])
+    elif groups:
+        raise ValueError(
+            "Channel groups were requested but no configuration module was loaded."
+        )
 
     if extra_channels:
         channels.extend(extra_channels)
@@ -214,6 +283,16 @@ def _collect_channels(
         if ch not in seen:
             seen.add(ch)
             unique_channels.append(ch)
+
+    if not unique_channels:
+        discovered = _discover_channels(data_dir, dataset_names)
+        if discovered:
+            warnings.warn(
+                "No channels were provided explicitly; discovered channels from "
+                f"datasets: {', '.join(discovered)}"
+            )
+        unique_channels = discovered
+
     return unique_channels
 
 
@@ -290,7 +369,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Percentile values must lie in [0, 1]. Received {value}."
             )
 
-    channels = _collect_channels(args.channel_groups, args.channels)
+    module_name: Optional[str]
+    if args.config_module and args.config_module.lower() != "none":
+        module_name = args.config_module
+    else:
+        module_name = None
+
+    channel_config = _load_channel_config(module_name)
+
+    channels = _collect_channels(
+        channel_config,
+        args.channel_groups,
+        args.channels,
+        data_dir=args.data_dir,
+        dataset_names=args.datasets,
+    )
     if not channels:
         raise ValueError("No channels selected for scanning.")
 
