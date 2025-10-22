@@ -103,9 +103,45 @@ class SummaryProjector(nn.Module):
         return self.proj(summary)
 
 
+class PointSetAggregator(nn.Module):
+    """Helper module that pools per-point embeddings and applies the multi-task head."""
+
+    def __init__(
+        self,
+        feature_dim: int,
+        *,
+        summary_dim: int,
+        head_hidden: Sequence[int],
+        dropout: float,
+        num_classes: int,
+        use_summary: bool,
+        use_uncertainty: bool,
+    ) -> None:
+        super().__init__()
+        self.pool = MaskedMaxMeanPool(feature_dim)
+        self.summary_proj = SummaryProjector(summary_dim, feature_dim, enabled=use_summary)
+        combined_dim = self.pool.output_dim + self.summary_proj.output_dim
+        self.head = MultiTaskHead(
+            combined_dim,
+            hidden_dims=head_hidden,
+            dropout=dropout,
+            num_classes=num_classes,
+            use_uncertainty=use_uncertainty,
+        )
+
+    def forward(self, per_point: torch.Tensor, batch: dict[str, torch.Tensor]) -> ModelOutputs:
+        mask = batch["mask"]
+        features = self.pool(per_point, mask)
+        summary = self.summary_proj(batch.get("summary"))
+        if summary is not None:
+            features = torch.cat([features, summary], dim=-1)
+        return self.head(features)
+
+
 __all__ = [
     "ModelOutputs",
     "MultiTaskHead",
     "MaskedMaxMeanPool",
     "SummaryProjector",
+    "PointSetAggregator",
 ]

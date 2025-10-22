@@ -7,7 +7,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from .base import MaskedMaxMeanPool, ModelOutputs, MultiTaskHead, SummaryProjector
+from .base import ModelOutputs, PointSetAggregator
 
 
 class PointSetTransformer(nn.Module):
@@ -48,15 +48,13 @@ class PointSetTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
 
         self.norm = nn.LayerNorm(hidden_dim)
-        self.pool = MaskedMaxMeanPool(hidden_dim)
-        self.summary_proj = SummaryProjector(summary_dim, hidden_dim, enabled=use_summary)
-
-        feature_dim = self.pool.output_dim + self.summary_proj.output_dim
-        self.head = MultiTaskHead(
-            feature_dim,
-            hidden_dims=head_hidden,
+        self.aggregator = PointSetAggregator(
+            hidden_dim,
+            summary_dim=summary_dim,
+            head_hidden=head_hidden,
             dropout=dropout,
             num_classes=num_classes,
+            use_summary=use_summary,
             use_uncertainty=use_uncertainty,
         )
 
@@ -70,11 +68,7 @@ class PointSetTransformer(nn.Module):
         x = self.norm(x)
         x = x * mask.unsqueeze(-1).float()
 
-        features = self.pool(x, mask)
-        summary = self.summary_proj(batch.get("summary"))
-        if summary is not None:
-            features = torch.cat([features, summary], dim=-1)
-        return self.head(features)
+        return self.aggregator(x, batch)
 
 
 __all__ = ["PointSetTransformer"]
