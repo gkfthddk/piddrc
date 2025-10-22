@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
@@ -154,6 +155,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Torch device string to use for training",
+    )
+    misc_group.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated list of CUDA device indices to expose via "
+            "CUDA_VISIBLE_DEVICES"
+        ),
     )
     misc_group.add_argument(
         "--checkpoint",
@@ -309,6 +319,11 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 def main() -> None:
     args = parse_args()
+
+    if args.gpus is not None:
+        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+
     device = torch.device(args.device)
 
     train_dataset, val_dataset = build_datasets(args)
