@@ -6,13 +6,10 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-np = pytest.importorskip("numpy", reason="numpy is required for pipeline integration tests")
-torch = pytest.importorskip("torch", reason="torch is required for pipeline integration tests")
-h5py = pytest.importorskip("h5py", reason="h5py is required for pipeline integration tests")
+np = pytest.importorskip("numpy")
+torch = pytest.importorskip("torch")
+h5py = pytest.importorskip("h5py")
+from torch.utils.data import DataLoader
 
 from piddrc.data import DualReadoutEventDataset, collate_events
 from piddrc.engine import Trainer, TrainingConfig
