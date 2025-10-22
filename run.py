@@ -21,6 +21,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
+from pid.models.base import ModelOutputs, MultiTaskHead
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_transformer import PointSetTransformer
@@ -199,6 +200,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip training and only run evaluation using the provided checkpoint",
     )
+    misc_group.add_argument(
+        "--print_model_summary",
+        action="store_true",
+        help="Print a torchinfo overview of the model before training",
+    )
 
     return parser.parse_args(argv)
 
@@ -284,6 +290,60 @@ def build_dataloaders(
     return train_loader, val_loader
 
 
+def maybe_print_model_summary(
+    model: nn.Module,
+    train_loader: DataLoader,
+    device: torch.device,
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+
+    try:
+        from torchinfo import summary
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        raise ModuleNotFoundError(
+            "The torchinfo package is required to print the model overview. "
+            "Install it via 'pip install torchinfo'."
+        ) from exc
+
+    sample_batch = next(iter(train_loader))
+    sample_batch = {
+        key: tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
+        for key, tensor in sample_batch.items()
+    }
+
+    hook_handles: list[torch.utils.hooks.RemovableHandle] = []
+
+    def convert_outputs(output: Any) -> Any:
+        if not isinstance(output, ModelOutputs):
+            return output
+        tensors: list[torch.Tensor] = [output.logits, output.energy]
+        if output.log_sigma is not None:
+            tensors.append(output.log_sigma)
+        tensors.extend(output.extras.values())
+        return tuple(tensors)
+
+    for module in model.modules():
+        if isinstance(module, MultiTaskHead):
+            handle = module.register_forward_hook(
+                lambda _module, _inputs, output: convert_outputs(output)
+            )
+            hook_handles.append(handle)
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            summary(model, input_data=(sample_batch,))
+    finally:
+        for handle in hook_handles:
+            handle.remove()
+    if was_training:
+        model.train()
+
+
 def configure_trainer(
     model: nn.Module,
     *,
@@ -348,6 +408,13 @@ def main() -> None:
         val_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+    )
+
+    maybe_print_model_summary(
+        model,
+        train_loader,
+        device,
+        enabled=args.print_model_summary,
     )
 
     trainer, optimizer = configure_trainer(
