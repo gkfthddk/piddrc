@@ -198,6 +198,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip training and only run evaluation using the provided checkpoint",
     )
+    misc_group.add_argument(
+        "--print_model_summary",
+        action="store_true",
+        help="Print a torchsummary overview of the model before training",
+    )
 
     return parser.parse_args(argv)
 
@@ -283,6 +288,38 @@ def build_dataloaders(
     return train_loader, val_loader
 
 
+def maybe_print_model_summary(
+    model: nn.Module,
+    train_loader: DataLoader,
+    device: torch.device,
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+
+    try:
+        from torchsummary import summary
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        raise ModuleNotFoundError(
+            "The torchsummary package is required to print the model overview. "
+            "Install it via 'pip install torchsummary'."
+        ) from exc
+
+    sample_batch = next(iter(train_loader))
+    sample_batch = {
+        key: tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
+        for key, tensor in sample_batch.items()
+    }
+
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        summary(model, input_data=(sample_batch,))
+    if was_training:
+        model.train()
+
+
 def configure_trainer(
     model: nn.Module,
     *,
@@ -347,6 +384,13 @@ def main() -> None:
         val_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+    )
+
+    maybe_print_model_summary(
+        model,
+        train_loader,
+        device,
+        enabled=args.print_model_summary,
     )
 
     trainer, optimizer = configure_trainer(

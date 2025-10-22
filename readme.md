@@ -69,6 +69,19 @@ All models produce three outputs:
 4. **Evaluate** using `trainer.evaluate(test_loader)` to obtain a summary
    of PID and energy metrics.
 
+### Inspecting model architectures
+
+The training script can print a [`torchsummary`](https://github.com/sksq96/pytorch-summary)
+overview of the selected architecture using a representative batch drawn
+from the training data. Enable it via the `--print_model_summary` flag:
+
+```bash
+python run.py --print_model_summary --eval_only --checkpoint path/to/checkpoint.pt
+```
+
+This is a convenient way to verify tensor shapes and parameter counts
+before launching long training runs.
+
 ## Testing
 
 A lightweight unit test suite is available to validate the full training
