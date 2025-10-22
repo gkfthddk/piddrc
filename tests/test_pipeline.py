@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
+np = pytest.importorskip("numpy")
+torch = pytest.importorskip("torch")
 h5py = pytest.importorskip("h5py")
-import numpy as np
-import torch
 from torch.utils.data import DataLoader
 
 from piddrc.data import DualReadoutEventDataset, collate_events
