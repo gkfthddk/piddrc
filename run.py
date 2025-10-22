@@ -12,9 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import types
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Sequence, Tuple
+from typing import Any, Dict, Iterable, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -314,7 +313,7 @@ def maybe_print_model_summary(
         for key, tensor in sample_batch.items()
     }
 
-    patched_forwards: list[tuple[nn.Module, Callable[..., Any]]] = []
+    hook_handles: list[torch.utils.hooks.RemovableHandle] = []
 
     def convert_outputs(output: Any) -> Any:
         if not isinstance(output, ModelOutputs):
@@ -327,14 +326,10 @@ def maybe_print_model_summary(
 
     for module in model.modules():
         if isinstance(module, MultiTaskHead):
-            original_forward = module.forward
-
-            def wrapper(*args: Any, _orig: Callable[..., Any] = original_forward, **kwargs: Any) -> Any:
-                result = _orig(*args, **kwargs)
-                return convert_outputs(result)
-
-            module.forward = types.MethodType(wrapper, module)
-            patched_forwards.append((module, original_forward))
+            handle = module.register_forward_hook(
+                lambda _module, _inputs, output: convert_outputs(output)
+            )
+            hook_handles.append(handle)
 
     was_training = model.training
     model.eval()
@@ -342,8 +337,8 @@ def maybe_print_model_summary(
         with torch.no_grad():
             summary(model, input_data=(sample_batch,))
     finally:
-        for module, original_forward in patched_forwards:
-            module.forward = original_forward
+        for handle in hook_handles:
+            handle.remove()
     if was_training:
         model.train()
 
