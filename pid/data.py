@@ -103,8 +103,8 @@ class DualReadoutEventDataset(Dataset):
         label_key: str,
         energy_key: str,
         max_points: Optional[int] = None,
-        scintillation_key: str = "S",
-        cherenkov_key: str = "C",
+        is_cherenkov_key: str = "DRcalo3dHits.type",
+        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
         depth_key: Optional[str] = "z",
         time_key: Optional[str] = "t",
         summary_fn: Optional[SummaryFn] = None,
@@ -118,15 +118,12 @@ class DualReadoutEventDataset(Dataset):
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
         self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
-        for required_feature, name in (("scintillation", scintillation_key), ("cherenkov", cherenkov_key)):
-            if name not in self.feature_to_index:
-                raise KeyError(f"{required_feature} feature '{name}' is not part of hit_features: {self.hit_features}")
 
         self.label_key = label_key
         self.energy_key = energy_key
         self.max_points = max_points
-        self.scintillation_key = scintillation_key
-        self.cherenkov_key = cherenkov_key
+        self.is_cherenkov_key = is_cherenkov_key
+        self.amp_sum_key = amp_sum_key
         self.depth_key = depth_key
         self.time_key = time_key
         self.summary_fn = summary_fn or self._default_summary
@@ -221,38 +218,52 @@ class DualReadoutEventDataset(Dataset):
     def _default_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""
 
-        s = points[:, index_map[self.scintillation_key]]
-        c = points[:, index_map[self.cherenkov_key]]
-        total = s + c
-        s_sum = float(np.sum(s))
+        is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
+        c = points[is_cherenkov, index_map[self.amp_sum_key]]
+        s = points[~is_cherenkov, index_map[self.amp_sum_key]]
         c_sum = float(np.sum(c))
-        total_sum = float(np.sum(total))
+        s_sum = float(np.sum(s))
+        total_sum = c_sum+s_sum
         ratio = float(c_sum / (s_sum + 1e-6))
         s_minus_c = float(s_sum - c_sum)
 
         stats: List[float] = [s_sum, c_sum, total_sum, ratio, s_minus_c]
 
         if self.depth_key and self.depth_key in index_map:
-            z = points[:, index_map[self.depth_key]]
-            if np.sum(total) > 0:
-                depth_mean = float(np.average(z, weights=total))
-                depth_std = float(np.sqrt(np.average((z - depth_mean) ** 2, weights=total)))
+            z_c = points[is_cherenkov, index_map[self.depth_key]]
+            if c_sum > 0:
+                depth_mean_c = float(np.average(z_c, weights=c))
+                depth_std_c = float(np.sqrt(np.average((z_c - depth_mean_c) ** 2, weights=c)))
             else:
-                depth_mean = float(np.mean(z))
-                depth_std = float(np.std(z))
-            stats.extend([depth_mean, depth_std])
+                depth_mean_c = float(np.mean(z_c))
+                depth_std_c = float(np.std(z_c))
+            stats.extend([depth_mean_c, depth_std_c])
+            z_s = points[~is_cherenkov, index_map[self.depth_key]]
+            if s_sum > 0:
+                depth_mean_s = float(np.average(z_s, weights=s))
+                depth_std_s = float(np.sqrt(np.average((z_s - depth_mean_s) ** 2, weights=s)))
+            else:
+                depth_mean_s = float(np.mean(z_s))
+                depth_std_s = float(np.std(z_s))
+            stats.extend([depth_mean_s, depth_std_s])
         else:
-            stats.extend([0.0, 0.0])
+            stats.extend([0.0, 0.0, 0.0, 0.0])
 
         if self.time_key and self.time_key in index_map:
-            t = points[:, index_map[self.time_key]]
-            if np.sum(total) > 0:
-                time_mean = float(np.average(t, weights=total))
+            t_c = points[is_cherenkov, index_map[self.time_key]]
+            if c_sum > 0:
+                time_mean_c = float(np.average(t_c, weights=c))
             else:
-                time_mean = float(np.mean(t))
-            stats.append(time_mean)
+                time_mean_c = float(np.mean(t_c))
+            stats.append(time_mean_c)
+            t_s = points[~is_cherenkov, index_map[self.time_key]]
+            if s_sum > 0:
+                time_mean_s = float(np.average(t_s, weights=s))
+            else:
+                time_mean_s = float(np.mean(t_s))
+            stats.append(time_mean_s)
         else:
-            stats.append(0.0)
+            stats.extend([0.0, 0.0])
 
         return np.asarray(stats, dtype=np.float32)
 

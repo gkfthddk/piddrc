@@ -35,40 +35,48 @@ def parse_args() -> argparse.Namespace:
 
     io_group = parser.add_argument_group("Data")
     io_group.add_argument(
-        "--train-files",
+        "--train_files",
         type=Path,
         nargs="+",
-        required=True,
+        default=("h5s/e-_1-100GeV.h5py", "h5s/gamma_1-100GeV.h5py", "h5s/pi0_1-100GeV.h5py", "h5s/pi+_1-100GeV.h5py"),
         help="Paths to the training HDF5 files",
     )
     io_group.add_argument(
-        "--val-files",
+        "--val_files",
         type=Path,
         nargs="*",
         default=None,
         help="Optional validation HDF5 files",
     )
     io_group.add_argument(
-        "--hit-features",
+        "--hit_features",
         type=str,
         nargs="+",
-        default=("S", "C", "x", "y", "z", "t"),
+        default=(
+            "DRcalo3dHits.amplitude_sum",
+            "DRcalo3dHits.type",
+            "DRcalo3dHits.time",
+            "DRcalo3dHits.time_end",
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+            ),
         help="Hit-level feature names to load from the HDF5 files",
     )
     io_group.add_argument(
-        "--label-key",
+        "--label_key",
         type=str,
-        default="label",
+        default="GenParticles.PDG",
         help="Dataset name containing the classification label",
     )
     io_group.add_argument(
-        "--energy-key",
+        "--energy_key",
         type=str,
         default="E_gen",
         help="Dataset name containing the regression target (energy)",
     )
     io_group.add_argument(
-        "--max-points",
+        "--max_points",
         type=int,
         default=1000,
         help="Randomly down-sample each event to this many hits",
@@ -83,7 +91,7 @@ def parse_args() -> argparse.Namespace:
         help="Which point-set backbone to train",
     )
     model_group.add_argument(
-        "--hidden-dim",
+        "--hidden_dim",
         type=int,
         default=128,
         help="Hidden dimension used by the backbone",
@@ -95,13 +103,13 @@ def parse_args() -> argparse.Namespace:
         help="Number of layers/blocks in the backbone",
     )
     model_group.add_argument(
-        "--num-heads",
+        "--num_heads",
         type=int,
         default=4,
         help="Number of attention heads (Transformer only)",
     )
     model_group.add_argument(
-        "--mlp-ratio",
+        "--mlp_ratio",
         type=float,
         default=4.0,
         help="Feed-forward expansion ratio (Transformer only)",
@@ -113,32 +121,32 @@ def parse_args() -> argparse.Namespace:
         help="Dropout probability applied throughout the model",
     )
     model_group.add_argument(
-        "--head-hidden",
+        "--head_hidden",
         type=int,
         nargs="+",
         default=(256, 128),
         help="Hidden dimensions of the multi-task prediction head",
     )
     model_group.add_argument(
-        "--disable-summary",
+        "--disable_summary",
         action="store_true",
         help="Do not fuse per-event summary features into the head",
     )
     model_group.add_argument(
-        "--disable-uncertainty",
+        "--disable_uncertainty",
         action="store_true",
         help="Disable the log-variance regression head",
     )
 
     train_group = parser.add_argument_group("Optimisation")
-    train_group.add_argument("--batch-size", type=int, default=64)
+    train_group.add_argument("--batch_size", type=int, default=64)
     train_group.add_argument("--epochs", type=int, default=100)
-    train_group.add_argument("--learning-rate", type=float, default=3e-4)
-    train_group.add_argument("--weight-decay", type=float, default=1e-2)
-    train_group.add_argument("--log-every", type=int, default=10)
-    train_group.add_argument("--max-grad-norm", type=float, default=5.0)
-    train_group.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision")
-    train_group.add_argument("--num-workers", type=int, default=4)
+    train_group.add_argument("--learning_rate", type=float, default=3e-4)
+    train_group.add_argument("--weight_decay", type=float, default=1e-2)
+    train_group.add_argument("--log_every", type=int, default=10)
+    train_group.add_argument("--max_grad_norm", type=float, default=5.0)
+    train_group.add_argument("--no_amp", action="store_true", help="Disable automatic mixed precision")
+    train_group.add_argument("--num_workers", type=int, default=4)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -154,13 +162,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to save the trained model weights",
     )
     misc_group.add_argument(
-        "--history-json",
+        "--history_json",
         type=Path,
         default=None,
         help="Optional path to dump the training/validation metrics as JSON",
     )
     misc_group.add_argument(
-        "--eval-only",
+        "--eval_only",
         action="store_true",
         help="Skip training and only run evaluation using the provided checkpoint",
     )

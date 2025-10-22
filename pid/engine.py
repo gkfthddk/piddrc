@@ -39,7 +39,7 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device
         self.config = config or TrainingConfig()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.config.use_amp and device.type == "cuda")
+        self.scaler = torch.amp.GradScaler('cuda',enabled=self.config.use_amp and device.type == "cuda")
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,7 +76,7 @@ class Trainer:
 
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
-            with torch.cuda.amp.autocast(enabled=self.scaler.is_enabled()):
+            with torch.amp.autocast('cuda',enabled=self.scaler.is_enabled()):
                 outputs = self.model(batch)
                 loss_cls, loss_reg = self._compute_losses(outputs, batch)
                 loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
