@@ -38,7 +38,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
-        required=True,
+        default="h5s",
         help="Directory that contains <dataset>.h5py files",
     )
     parser.add_argument(
@@ -71,7 +71,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--channels",
         nargs="*",
-        default=None,
+        default=(
+            "C_amp",
+            "S_amp",
+            "E_gen",
+            ),
         help=(
             "Explicit dataset names to include in addition to the configured "
             "channel groups.  When omitted and no configuration module is "
