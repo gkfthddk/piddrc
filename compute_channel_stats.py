@@ -64,7 +64,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default="config",
         help=(
             "Python module that exposes get_channel_config(). Set to 'none' to "
-            "skip loading channel groups from a module."
+            "skip loading channel groups from a module. If the module cannot be "
+            "imported the script will fall back to discovery."
         ),
     )
     parser.add_argument(
@@ -195,17 +196,21 @@ class StreamingStats:
         }
 
 
-def _load_channel_config(module_name: Optional[str]) -> Optional[Mapping[str, Mapping[str, object]]]:
+def _load_channel_config(
+    module_name: Optional[str],
+) -> Optional[Mapping[str, Mapping[str, object]]]:
     if module_name is None:
         return None
 
     try:
         module = import_module(module_name)
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            f"Could not import module '{module_name}' for channel configuration"
-        ) from exc
-
+    except ModuleNotFoundError:
+        warnings.warn(
+            "Channel configuration module '%s' could not be imported; proceeding "
+            "without predefined channel groups." % module_name
+        )
+        return None
+    
     if not hasattr(module, "get_channel_config"):
         raise AttributeError(
             f"Module '{module_name}' does not define get_channel_config()."
