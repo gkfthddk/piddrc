@@ -12,14 +12,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import types
 from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Sequence, Tuple
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
 from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
+from pid.models.base import ModelOutputs, MultiTaskHead
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_transformer import PointSetTransformer
@@ -201,7 +203,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     misc_group.add_argument(
         "--print_model_summary",
         action="store_true",
-        help="Print a torchsummary overview of the model before training",
+        help="Print a torchinfo overview of the model before training",
     )
 
     return parser.parse_args(argv)
@@ -312,10 +314,36 @@ def maybe_print_model_summary(
         for key, tensor in sample_batch.items()
     }
 
+    patched_forwards: list[tuple[nn.Module, Callable[..., Any]]] = []
+
+    def convert_outputs(output: Any) -> Any:
+        if not isinstance(output, ModelOutputs):
+            return output
+        tensors: list[torch.Tensor] = [output.logits, output.energy]
+        if output.log_sigma is not None:
+            tensors.append(output.log_sigma)
+        tensors.extend(output.extras.values())
+        return tuple(tensors)
+
+    for module in model.modules():
+        if isinstance(module, MultiTaskHead):
+            original_forward = module.forward
+
+            def wrapper(*args: Any, _orig: Callable[..., Any] = original_forward, **kwargs: Any) -> Any:
+                result = _orig(*args, **kwargs)
+                return convert_outputs(result)
+
+            module.forward = types.MethodType(wrapper, module)
+            patched_forwards.append((module, original_forward))
+
     was_training = model.training
     model.eval()
-    with torch.no_grad():
-        summary(model, input_data=(sample_batch,))
+    try:
+        with torch.no_grad():
+            summary(model, input_data=(sample_batch,))
+    finally:
+        for module, original_forward in patched_forwards:
+            module.forward = original_forward
     if was_training:
         model.train()
 
