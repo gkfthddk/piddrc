@@ -10,7 +10,10 @@ parser.add_argument("--name",type=str,default="test",help='save name model will 
 parser.add_argument("--exe",type=str,default='run.py',help='pt for dataset')
 
 args, unknown = parser.parse_known_args()
-jobname=args.name  
+jobname=args.name
+transfer_inputs = [args.exe]
+if os.path.isdir("piddrc"):
+    transfer_inputs.append("piddrc")
 if(os.path.isfile(f'condor/{jobname}.out')):
     os.remove(f'condor/{jobname}.out')
     os.remove(f'condor/{jobname}.error')
@@ -26,7 +29,7 @@ submit_desc={
     'request_gpus':1,
     'request_disk':f'84092',
     'requirements':'(machine != "gpu01.sscc.uos")',
-    'transfer_input_files':"nh5.py, pm.py",
+    'transfer_input_files':",".join(transfer_inputs),
     'executable':args.exe,
     'transfer_output_files':'save',
     'output':f'condor/{jobname}.out',
