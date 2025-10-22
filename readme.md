@@ -10,12 +10,12 @@ Mamba-inspired networks) on both simulated and test-beam data.
 
 | Module | Description |
 | --- | --- |
-| `piddrc.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
-| `piddrc.models.mlp.SummaryMLP` | Simple baseline operating on engineered S/C summary statistics. |
-| `piddrc.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with multi-task (PID + energy) head. |
-| `piddrc.models.pointset_transformer.PointSetTransformer` | Transformer encoder for masked point sets with global pooling head. |
-| `piddrc.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
-| `piddrc.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
+| `pid.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
+| `pid.models.mlp.SummaryMLP` | Simple baseline operating on engineered S/C summary statistics. |
+| `pid.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with multi-task (PID + energy) head. |
+| `pid.models.pointset_transformer.PointSetTransformer` | Transformer encoder for masked point sets with global pooling head. |
+| `pid.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
+| `pid.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
 
 All models produce three outputs:
 
@@ -25,12 +25,16 @@ All models produce three outputs:
 
 ## Quick Start
 
-1. **Install dependencies** (PyTorch, h5py, numpy, scikit-learn, tqdm).
+1. **Install dependencies** using the provided requirements file:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
 2. **Create a dataset** by pointing the loader to your HDF5 files:
 
    ```python
    from torch.utils.data import DataLoader
-   from piddrc.data import DualReadoutEventDataset, collate_events
+   from pid.data import DualReadoutEventDataset, collate_events
 
    dataset = DualReadoutEventDataset(
        files=["/path/to/electrons.h5", "/path/to/pions.h5"],
@@ -47,8 +51,8 @@ All models produce three outputs:
 
    ```python
    import torch
-   from piddrc.engine import Trainer, TrainingConfig
-   from piddrc.models.pointset_mlp import PointSetMLP
+   from pid.engine import Trainer, TrainingConfig
+   from pid.models.pointset_mlp import PointSetMLP
 
    sample = dataset[0]
    model = PointSetMLP(
