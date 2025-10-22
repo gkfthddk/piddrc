@@ -107,16 +107,16 @@ class Trainer:
             if training and step % self.config.log_every == 0:
                 postfix = {
                     "loss": sum(losses) / len(losses),
-                    "loss_reg": sum(reg_losses) / len(reg_losses),
+                    "reg": sum(reg_losses) / len(reg_losses),
                 }
+                if sigma_values:
+                    postfix["sigma"] = sum(sigma_values) / len(sigma_values)
                 try:
                     auc = metrics_mod.roc_auc(torch.cat(logits_list), torch.cat(labels_list))
                 except RuntimeError:
                     auc = None
                 if auc is not None:
                     postfix["auc"] = auc
-                if sigma_values:
-                    postfix["exp_sigma"] = sum(sigma_values) / len(sigma_values)
                 iterator.set_postfix(postfix)
 
         metrics = self._compute_metrics(
