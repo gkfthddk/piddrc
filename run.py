@@ -167,12 +167,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Torch device string to use for training",
-    )
-    misc_group.add_argument(
         "--gpus",
         type=str,
         default=gpus_args.gpus,
@@ -180,6 +174,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Optional comma-separated list of CUDA device indices to expose via "
             "CUDA_VISIBLE_DEVICES"
         ),
+    )
+    misc_group.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Torch device string to use for training",
     )
     misc_group.add_argument(
         "--checkpoint",
