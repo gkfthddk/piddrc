@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Sequence, Tuple
 
 import torch
+torch.set_num_threads(16)
 from torch import nn
 from torch.utils.data import DataLoader
 
