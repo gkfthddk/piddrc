@@ -12,8 +12,8 @@ parser.add_argument("--exe",type=str,default='run.py',help='pt for dataset')
 args, unknown = parser.parse_known_args()
 jobname=args.name
 transfer_inputs = [args.exe]
-if os.path.isdir("piddrc"):
-    transfer_inputs.append("piddrc")
+if os.path.isdir("pid"):
+    transfer_inputs.append("pid")
 if(os.path.isfile(f'condor/{jobname}.out')):
     os.remove(f'condor/{jobname}.out')
     os.remove(f'condor/{jobname}.error')

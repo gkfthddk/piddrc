@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Training entry-point that wires together the refactored point-set models.
 
-This script relies exclusively on the modules living under ``piddrc/`` for
+This script relies exclusively on the modules living under ``pid/`` for
 model construction, data loading and the training loop.  It intentionally avoids
 the legacy ``pm`` implementation so that running ``python run.py`` exercises the
 new, shared ``PointSetAggregator`` pathway.
@@ -18,10 +18,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from piddrc import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
-from piddrc.models.pointset_mamba import PointSetMamba
-from piddrc.models.pointset_mlp import PointSetMLP
-from piddrc.models.pointset_transformer import PointSetTransformer
+from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
+from pid.models.pointset_mamba import PointSetMamba
+from pid.models.pointset_mlp import PointSetMLP
+from pid.models.pointset_transformer import PointSetTransformer
 
 MODEL_REGISTRY = {
     "mlp": PointSetMLP,

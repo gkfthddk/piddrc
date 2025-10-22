@@ -11,12 +11,12 @@ torch = pytest.importorskip("torch")
 h5py = pytest.importorskip("h5py")
 from torch.utils.data import DataLoader
 
-from piddrc.data import DualReadoutEventDataset, collate_events
-from piddrc.engine import Trainer, TrainingConfig
-from piddrc.models.mlp import SummaryMLP
-from piddrc.models.pointset_mlp import PointSetMLP
-from piddrc.models.pointset_mamba import PointSetMamba
-from piddrc.models.pointset_transformer import PointSetTransformer
+from pid.data import DualReadoutEventDataset, collate_events
+from pid.engine import Trainer, TrainingConfig
+from pid.models.mlp import SummaryMLP
+from pid.models.pointset_mlp import PointSetMLP
+from pid.models.pointset_mamba import PointSetMamba
+from pid.models.pointset_transformer import PointSetTransformer
 
 
 HIT_FEATURES = ("x", "y", "z", "S", "C", "t")
