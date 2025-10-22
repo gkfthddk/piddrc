@@ -13,14 +13,15 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import torch
 torch.set_num_threads(16)
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, random_split
 
 from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
+from pid.data import EventRecord
 from pid.models.base import ModelOutputs, MultiTaskHead
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
@@ -68,6 +69,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional validation HDF5 files",
     )
     io_group.add_argument(
+        "--test_files",
+        type=Path,
+        nargs="*",
+        default=None,
+        help="Optional test HDF5 files",
+    )
+    io_group.add_argument(
         "--hit_features",
         type=str,
         nargs="+",
@@ -99,6 +107,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1000,
         help="Randomly down-sample each event to this many hits",
+    )
+    io_group.add_argument(
+        "--val_fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of the training data to reserve for validation when no validation files are provided",
+    )
+    io_group.add_argument(
+        "--test_fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of the training data to reserve for testing when no test files are provided",
+    )
+    io_group.add_argument(
+        "--split_seed",
+        type=int,
+        default=1234,
+        help="Random seed used when splitting the training dataset",
     )
 
     model_group = parser.add_argument_group("Model")
@@ -209,8 +235,97 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def build_datasets(args: argparse.Namespace) -> Tuple[DualReadoutEventDataset, DualReadoutEventDataset | None]:
-    train_dataset = DualReadoutEventDataset(
+def _split_dataset(
+    dataset: DualReadoutEventDataset,
+    *,
+    val_fraction: float,
+    test_fraction: float,
+    need_val: bool,
+    need_test: bool,
+    seed: int,
+) -> Tuple[Dataset[EventRecord], Dataset[EventRecord] | None, Dataset[EventRecord] | None]:
+    if not need_val and not need_test:
+        return dataset, None, None
+
+    if not 0.0 <= val_fraction < 1.0:
+        raise ValueError("val_fraction must be in the [0, 1) range")
+    if not 0.0 <= test_fraction < 1.0:
+        raise ValueError("test_fraction must be in the [0, 1) range")
+    if val_fraction + test_fraction >= 1.0:
+        raise ValueError("The sum of val_fraction and test_fraction must be < 1")
+
+    total = len(dataset)
+    if total == 0:
+        raise ValueError("Cannot split an empty dataset")
+
+    val_len = 0
+    if need_val and val_fraction > 0.0:
+        val_len = max(int(total * val_fraction), 1)
+
+    test_len = 0
+    if need_test and test_fraction > 0.0:
+        test_len = max(int(total * test_fraction), 1)
+
+    train_len = total - val_len - test_len
+    if train_len <= 0:
+        raise ValueError(
+            "Not enough events to perform the requested split. "
+            "Consider lowering val_fraction/test_fraction."
+        )
+
+    lengths: List[int] = [train_len]
+    include_val = val_len > 0
+    include_test = test_len > 0
+    if include_val:
+        lengths.append(val_len)
+    if include_test:
+        lengths.append(test_len)
+
+    if len(lengths) == 1:
+        return dataset, None, None
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    subsets = random_split(dataset, lengths, generator=generator)
+
+    subset_iter = iter(subsets)
+    train_subset = next(subset_iter)
+    val_subset = next(subset_iter) if include_val else None
+    test_subset = next(subset_iter) if include_test else None
+
+    def _indices_to_set(subset: Dataset[EventRecord] | None) -> set[int]:
+        if subset is None:
+            return set()
+        indices = getattr(subset, "indices", None)
+        if indices is None:
+            return set()
+        if isinstance(indices, torch.Tensor):
+            indices = indices.tolist()
+        return {int(idx) for idx in indices}
+
+    train_indices = _indices_to_set(train_subset)
+    val_indices = _indices_to_set(val_subset)
+    test_indices = _indices_to_set(test_subset)
+
+    if train_indices & val_indices:
+        raise RuntimeError("Training and validation splits share overlapping events")
+    if train_indices & test_indices:
+        raise RuntimeError("Training and test splits share overlapping events")
+    if val_indices & test_indices:
+        raise RuntimeError("Validation and test splits share overlapping events")
+
+    return train_subset, val_subset, test_subset
+
+
+def build_datasets(
+    args: argparse.Namespace,
+) -> Tuple[
+    DualReadoutEventDataset,
+    Dataset[EventRecord],
+    Dataset[EventRecord] | None,
+    Dataset[EventRecord] | None,
+]:
+    base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
         label_key=args.label_key,
@@ -226,10 +341,39 @@ def build_datasets(args: argparse.Namespace) -> Tuple[DualReadoutEventDataset, D
             label_key=args.label_key,
             energy_key=args.energy_key,
             max_points=args.max_points,
-            class_names=train_dataset.classes,
+            class_names=base_dataset.classes,
         )
 
-    return train_dataset, val_dataset
+    test_dataset = None
+    if args.test_files:
+        test_dataset = DualReadoutEventDataset(
+            [str(path) for path in args.test_files],
+            hit_features=args.hit_features,
+            label_key=args.label_key,
+            energy_key=args.energy_key,
+            max_points=args.max_points,
+            class_names=base_dataset.classes,
+        )
+
+    train_dataset: Dataset[EventRecord] = base_dataset
+    need_val_split = val_dataset is None
+    need_test_split = test_dataset is None
+
+    if need_val_split or need_test_split:
+        train_dataset, split_val_dataset, split_test_dataset = _split_dataset(
+            base_dataset,
+            val_fraction=args.val_fraction if need_val_split else 0.0,
+            test_fraction=args.test_fraction if need_test_split else 0.0,
+            need_val=need_val_split,
+            need_test=need_test_split,
+            seed=args.split_seed,
+        )
+        if need_val_split:
+            val_dataset = split_val_dataset
+        if need_test_split:
+            test_dataset = split_test_dataset
+
+    return base_dataset, train_dataset, val_dataset, test_dataset
 
 
 def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> nn.Module:
@@ -269,12 +413,13 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
 
 
 def build_dataloaders(
-    train_dataset: DualReadoutEventDataset,
-    val_dataset: DualReadoutEventDataset | None,
+    train_dataset: Dataset[EventRecord],
+    val_dataset: Dataset[EventRecord] | None,
+    test_dataset: Dataset[EventRecord] | None,
     *,
     batch_size: int,
     num_workers: int,
-) -> Tuple[DataLoader, DataLoader | None]:
+) -> Tuple[DataLoader, DataLoader | None, DataLoader | None]:
     loader_kwargs = {
         "batch_size": batch_size,
         "collate_fn": collate_events,
@@ -287,7 +432,10 @@ def build_dataloaders(
     val_loader = None
     if val_dataset is not None:
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
-    return train_loader, val_loader
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+    return train_loader, val_loader, test_loader
 
 
 def maybe_print_model_summary(
@@ -399,13 +547,14 @@ def main() -> None:
 
     device = torch.device(args.device)
 
-    train_dataset, val_dataset = build_datasets(args)
-    model = build_model(args, train_dataset)
+    base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
+    model = build_model(args, base_dataset)
     model.to(device)
 
-    train_loader, val_loader = build_dataloaders(
+    train_loader, val_loader, test_loader = build_dataloaders(
         train_dataset,
         val_dataset,
+        test_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
@@ -430,7 +579,14 @@ def main() -> None:
 
     if args.checkpoint is not None and args.eval_only:
         maybe_load_checkpoint(model, optimizer, args.checkpoint)
-        metrics = trainer.evaluate(val_loader or train_loader)
+        eval_targets: Dict[str, DataLoader] = {}
+        if test_loader is not None:
+            eval_targets["test"] = test_loader
+        if val_loader is not None:
+            eval_targets.setdefault("val", val_loader)
+        if not eval_targets:
+            eval_targets["train"] = train_loader
+        metrics = {split: trainer.evaluate(loader) for split, loader in eval_targets.items()}
         print(json.dumps(metrics, indent=2))
         return
 
@@ -441,8 +597,15 @@ def main() -> None:
     maybe_save_history(history, args.history_json)
     maybe_save_checkpoint(model, optimizer, args.checkpoint)
 
-    eval_loader = val_loader or train_loader
-    metrics = trainer.evaluate(eval_loader)
+    evaluation_loaders: Dict[str, DataLoader] = {}
+    if val_loader is not None:
+        evaluation_loaders["val"] = val_loader
+    if test_loader is not None:
+        evaluation_loaders["test"] = test_loader
+    if not evaluation_loaders:
+        evaluation_loaders["train"] = train_loader
+
+    metrics = {split: trainer.evaluate(loader) for split, loader in evaluation_loaders.items()}
     print(json.dumps(metrics, indent=2))
 
 
