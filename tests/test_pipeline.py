@@ -45,10 +45,10 @@ def dummy_h5(tmp_path):
         for feature in HIT_FEATURES:
             data = rng.normal(size=(8, 32)).astype(np.float32)
             f.create_dataset(feature, data=data)
-        labels = np.array(["electron", "pion"] * 4, dtype="S")
+        labels = np.array(["11", "211"] * 4, dtype="S")
         energies = rng.uniform(5, 50, size=8).astype(np.float32)
-        f.create_dataset("particle_type", data=labels)
-        f.create_dataset("true_energy", data=energies)
+        f.create_dataset("GenParticles.PDG", data=labels)
+        f.create_dataset("E_gen", data=energies)
     return file_path
 
 
