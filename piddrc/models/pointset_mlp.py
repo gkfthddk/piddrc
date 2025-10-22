@@ -7,7 +7,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from .base import MaskedMaxMeanPool, ModelOutputs, MultiTaskHead, SummaryProjector
+from .base import ModelOutputs, PointSetAggregator
 
 
 class PointSetMLPEncoder(nn.Module):
@@ -45,14 +45,13 @@ class PointSetMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.backbone = PointSetMLPEncoder(in_channels, backbone_channels)
-        self.pool = MaskedMaxMeanPool(backbone_channels[-1])
-        self.summary_proj = SummaryProjector(summary_dim, backbone_channels[-1], enabled=use_summary)
-        feature_dim = self.pool.output_dim + self.summary_proj.output_dim
-        self.head = MultiTaskHead(
-            feature_dim,
-            hidden_dims=head_hidden,
+        self.aggregator = PointSetAggregator(
+            backbone_channels[-1],
+            summary_dim=summary_dim,
+            head_hidden=head_hidden,
             dropout=dropout,
             num_classes=num_classes,
+            use_summary=use_summary,
             use_uncertainty=use_uncertainty,
         )
 
@@ -60,11 +59,7 @@ class PointSetMLP(nn.Module):
         points = batch["points"]
         mask = batch["mask"]
         per_point = self.backbone(points)
-        features = self.pool(per_point, mask)
-        summary = self.summary_proj(batch.get("summary"))
-        if summary is not None:
-            features = torch.cat([features, summary], dim=-1)
-        return self.head(features)
+        return self.aggregator(per_point, batch)
 
 
 __all__ = ["PointSetMLP"]
