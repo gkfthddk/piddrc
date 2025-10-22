@@ -64,13 +64,13 @@ def parse_args() -> argparse.Namespace:
     io_group.add_argument(
         "--energy-key",
         type=str,
-        default="E",
+        default="E_gen",
         help="Dataset name containing the regression target (energy)",
     )
     io_group.add_argument(
         "--max-points",
         type=int,
-        default=None,
+        default=1000,
         help="Randomly down-sample each event to this many hits",
     )
 
@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     model_group.add_argument(
         "--model",
         type=str,
-        default="transformer",
+        default="mamba",
         choices=sorted(MODEL_REGISTRY.keys()),
         help="Which point-set backbone to train",
     )
@@ -97,7 +97,7 @@ def parse_args() -> argparse.Namespace:
     model_group.add_argument(
         "--num-heads",
         type=int,
-        default=8,
+        default=4,
         help="Number of attention heads (Transformer only)",
     )
     model_group.add_argument(
@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
 
     train_group = parser.add_argument_group("Optimisation")
     train_group.add_argument("--batch-size", type=int, default=64)
-    train_group.add_argument("--epochs", type=int, default=20)
+    train_group.add_argument("--epochs", type=int, default=100)
     train_group.add_argument("--learning-rate", type=float, default=3e-4)
     train_group.add_argument("--weight-decay", type=float, default=1e-2)
     train_group.add_argument("--log-every", type=int, default=10)
