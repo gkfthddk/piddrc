@@ -227,7 +227,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip training and only run evaluation using the provided checkpoint",
     )
     misc_group.add_argument(
-        "--print_model_summary",
+        "--model_summary",
         action="store_true",
         help="Print a torchinfo overview of the model before training",
     )
@@ -438,7 +438,7 @@ def build_dataloaders(
     return train_loader, val_loader, test_loader
 
 
-def maybe_print_model_summary(
+def print_model_summary(
     model: nn.Module,
     train_loader: DataLoader,
     device: torch.device,
@@ -559,11 +559,11 @@ def main() -> None:
         num_workers=args.num_workers,
     )
 
-    maybe_print_model_summary(
+    print_model_summary(
         model,
         train_loader,
         device,
-        enabled=args.print_model_summary,
+        enabled=args.model_summary,
     )
 
     trainer, optimizer = configure_trainer(

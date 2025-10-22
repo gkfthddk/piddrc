@@ -128,7 +128,7 @@ class MaskedMaxMeanPool(nn.Module):
                     attn_input[valid_batches],
                     key_padding_mask=attn_mask[valid_batches],
                 )
-                attn_output[valid_batches] = torch.nan_to_num(attn_valid)
+                attn_output[valid_batches] = torch.nan_to_num(attn_valid).to(attn_output.dtype)
             pooled.append(attn_output.reshape(batch, -1))
 
         return torch.cat(pooled, dim=-1)
