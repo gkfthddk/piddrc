@@ -6,9 +6,16 @@ from pathlib import Path
 
 import pytest
 
-np = pytest.importorskip("numpy")
-torch = pytest.importorskip("torch")
-h5py = pytest.importorskip("h5py")
+try:
+    import numpy as np
+    import torch
+    import h5py
+except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+    raise pytest.UsageError(
+        "The pipeline integration tests require numpy, torch and h5py. "
+        "Install them via 'pip install -r requirements.txt' and re-run pytest."
+    ) from exc
+
 from torch.utils.data import DataLoader
 
 from pid.data import DualReadoutEventDataset, collate_events
