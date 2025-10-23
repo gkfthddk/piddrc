@@ -116,6 +116,16 @@ class DualReadoutEventDataset(Dataset):
     cache_file_handles:
         When ``True`` (default) the HDF5 files are kept open per worker
         process to avoid frequent reopen/close operations.
+    balance_files:
+        When ``True`` the dataset truncates each input file so that all files
+        contribute the same number of events, matching the smallest available
+        file after filtering. This is useful to avoid class imbalance when
+        individual files correspond to different particle species.
+    max_events:
+        Optional cap on the number of events retained per file after applying
+        filtering and (optional) balancing. When provided, each input file is
+        truncated to at most this many events which is handy for quick smoke
+        tests with a reduced sample size.
     """
 
     def __init__(
@@ -136,6 +146,8 @@ class DualReadoutEventDataset(Dataset):
         summary_fn: Optional[SummaryFn] = None,
         class_names: Optional[Sequence[str]] = None,
         cache_file_handles: bool = True,
+        balance_files: bool = False,
+        max_events: Optional[int] = None,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -154,6 +166,10 @@ class DualReadoutEventDataset(Dataset):
         self.time_key = time_key
         self.summary_fn = summary_fn or self._default_summary
         self.cache_file_handles = cache_file_handles
+        self._balance_files = balance_files
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative when provided")
+        self._max_events = max_events
 
         self._amp_sum_clip_percentile = amp_sum_clip_percentile
         self._amp_sum_clip_multiplier = amp_sum_clip_multiplier
@@ -226,19 +242,24 @@ class DualReadoutEventDataset(Dataset):
         filter_amp = self.amp_sum_key in self.hit_features
         threshold = self._amp_sum_threshold
 
+        per_file_indices: List[List[Tuple[int, int]]] = []
+
         for file_id, file_path in enumerate(self.files):
             with h5py.File(file_path, "r") as handle:
                 num_events = len(handle[self.label_key])
 
                 if not filter_amp or self.amp_sum_key not in handle:
-                    self._indices.extend((file_id, event_id) for event_id in range(num_events))
+                    file_indices = [(file_id, event_id) for event_id in range(num_events)]
+                    per_file_indices.append(file_indices)
                     continue
 
                 amp_dataset = handle[self.amp_sum_key]
                 if num_events == 0:
+                    per_file_indices.append([])
                     continue
 
                 chunk_size = min(max(num_events // 32, 1), 1024)
+                file_indices: List[Tuple[int, int]] = []
                 for start in range(0, num_events, chunk_size):
                     stop = min(start + chunk_size, num_events)
                     amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
@@ -255,7 +276,18 @@ class DualReadoutEventDataset(Dataset):
                     keep_mask = np.logical_and(finite_rows, totals <= threshold)
                     for offset, keep in enumerate(keep_mask):
                         if keep:
-                            self._indices.append((file_id, start + offset))
+                            file_indices.append((file_id, start + offset))
+
+                per_file_indices.append(file_indices)
+
+        if per_file_indices and self._balance_files:
+            min_events = min(len(entries) for entries in per_file_indices)
+            per_file_indices = [entries[:min_events] for entries in per_file_indices]
+
+        if per_file_indices and self._max_events is not None:
+            per_file_indices = [entries[: self._max_events] for entries in per_file_indices]
+
+        self._indices = [entry for entries in per_file_indices for entry in entries]
 
     def _estimate_amplitude_sum_threshold(self) -> float:
         """Estimate a robust amplitude sum threshold for masking outliers."""

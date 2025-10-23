@@ -136,6 +136,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=1234,
         help="Random seed used when splitting the training dataset",
     )
+    io_group.add_argument(
+        "--balance_train_files",
+        action="store_true",
+        help="Truncate each training file to match the smallest event count",
+    )
+    io_group.add_argument(
+        "--train_limit",
+        type=int,
+        default=None,
+        help="Optional per-file limit on the number of training events for quick tests",
+    )
 
     model_group = parser.add_argument_group("Model")
     model_group.add_argument(
@@ -262,7 +273,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "checkpoint, training history and evaluation metrics"
         ),
     )
-    args = parser.parse_args(argv)
+    misc_group.add_argument(
         "--test_outputs",
         type=Path,
         default=None,
@@ -271,6 +282,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
+    args = parser.parse_args(argv)
 
     if args.instance_name:
         base_dir = Path("runs") / args.instance_name
@@ -376,12 +388,17 @@ def build_datasets(
     Dataset[EventRecord] | None,
     Dataset[EventRecord] | None,
 ]:
+    balance_train_files = getattr(args, "balance_train_files", False)
+    train_limit = getattr(args, "train_limit", None)
+
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
         label_key=args.label_key,
         energy_key=args.energy_key,
         max_points=args.max_points,
+        balance_files=balance_train_files,
+        max_events=train_limit,
     )
 
     val_dataset = None
