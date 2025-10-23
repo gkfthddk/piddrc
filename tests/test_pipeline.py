@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import sys
 from pathlib import Path
+import json
 
 import pytest
 
@@ -112,6 +113,48 @@ def test_trainer_step(pipeline_dataset):
     metrics = history["train"][0]
     assert "loss" in metrics
     assert "accuracy" in metrics
+
+
+def test_instance_name_sets_default_artifact_paths(dummy_h5):
+    args = run.parse_args([
+        "--train_files",
+        str(dummy_h5),
+        "--instance_name",
+        "experiment_a",
+    ])
+
+    expected_base = Path("runs") / "experiment_a"
+    assert args.history_json == expected_base / "history.json"
+    assert args.checkpoint == expected_base / "checkpoint.pt"
+    assert args.metrics_json == expected_base / "metrics.json"
+    assert args.config_json == expected_base / "config.json"
+
+
+def test_maybe_save_metrics(tmp_path):
+    metrics = {"val": {"loss": 0.5, "accuracy": 0.9}}
+    output_path = tmp_path / "metrics" / "results.json"
+
+    run.maybe_save_metrics(metrics, output_path)
+
+    loaded = json.loads(output_path.read_text())
+    assert loaded == metrics
+
+
+def test_maybe_save_config(tmp_path):
+    config_path = tmp_path / "artifacts" / "config.json"
+    args = argparse.Namespace(
+        train_files=[Path("/data/train.h5")],
+        history_json=config_path,
+        checkpoint=None,
+        metrics_json=None,
+        config_json=config_path,
+    )
+
+    run.maybe_save_config(args, config_path)
+
+    saved = json.loads(config_path.read_text())
+    assert saved["train_files"] == ["/data/train.h5"]
+    assert saved["config_json"] == str(config_path)
 
 
 def test_build_datasets_auto_split(dummy_h5):
