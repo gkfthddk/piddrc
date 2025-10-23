@@ -22,6 +22,10 @@ class TrainingConfig:
     regression_weight: float = 1.0
     max_grad_norm: Optional[float] = None
     use_amp: bool = True
+    warmup_steps: int = 0
+    early_stopping_patience: Optional[int] = None
+    early_stopping_min_delta: float = 0.0
+    early_stopping_monitor: str = "loss"
 
 
 class Trainer:
@@ -40,19 +44,43 @@ class Trainer:
         self.device = device
         self.config = config or TrainingConfig()
         self.scaler = torch.amp.GradScaler('cuda',enabled=self.config.use_amp and device.type == "cuda")
+        self._global_step = 0
+        self._base_lrs = [group["lr"] for group in self.optimizer.param_groups]
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict[str, List[Dict[str, float]]]:
         history: Dict[str, List[Dict[str, float]]] = {"train": [], "val": []}
+        best_loss = float("inf")
+        epochs_without_improvement = 0
+        monitor_metric = self.config.early_stopping_monitor or "loss"
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(train_loader, training=True, epoch=epoch)
             history["train"].append(train_metrics)
             if val_loader is not None:
                 val_metrics = self._run_epoch(val_loader, training=False, epoch=epoch)
                 history["val"].append(val_metrics)
-            if self.scheduler is not None:
+                monitored_metrics = val_metrics
+            else:
+                monitored_metrics = train_metrics
+
+            if self.config.early_stopping_patience is not None:
+                monitored_value = monitored_metrics.get(monitor_metric)
+                if monitored_value is None:
+                    monitored_value = monitored_metrics.get("loss")
+                if monitored_value is not None:
+                    if monitored_value + self.config.early_stopping_min_delta < best_loss:
+                        best_loss = monitored_value
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+                        if epochs_without_improvement >= self.config.early_stopping_patience:
+                            break
+
+            if self.scheduler is not None and (
+                self.config.warmup_steps <= 0 or self._global_step >= self.config.warmup_steps
+            ):
                 self.scheduler.step()
         return history
 
@@ -84,6 +112,8 @@ class Trainer:
                 loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
 
             if training:
+                self._global_step += 1
+                self._apply_warmup()
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 if self.config.max_grad_norm is not None:
@@ -134,6 +164,16 @@ class Trainer:
         metrics["classification_loss"] = metrics["loss_cls"]
         metrics["regression_loss"] = metrics["loss_reg"]
         return metrics
+
+    def _apply_warmup(self) -> None:
+        warmup_steps = self.config.warmup_steps
+        if warmup_steps <= 0:
+            return
+        if self._global_step > warmup_steps:
+            return
+        progress = min(1.0, float(self._global_step) / float(warmup_steps))
+        for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
+            group["lr"] = base_lr * progress
 
     def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         labels = batch["labels"]
