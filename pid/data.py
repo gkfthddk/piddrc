@@ -80,6 +80,28 @@ class DualReadoutEventDataset(Dataset):
     time_key:
         Optional time-of-arrival feature. When provided, the mean
         arrival time is computed as part of the summary features.
+    amp_sum_clip_percentile:
+        When greater than zero, the dataset will estimate an adaptive
+        clipping threshold for the per-event sum of
+        ``amp_sum_key`` by sampling from the provided files and taking the
+        requested percentile. Events whose total amplitude exceeds the
+        resulting threshold (after multiplying by
+        ``amp_sum_clip_multiplier``) or contains non-finite amplitudes
+        will be removed from the dataset so that downstream consumers
+        never observe the problematic entries. Set to ``0`` or ``None`` to
+        disable the overflow-based filtering while keeping the
+        non-finite guard in place.
+    amp_sum_clip_multiplier:
+        Multiplicative safety margin applied on top of the sampled
+        percentile. This is useful to avoid clipping valid, but rare,
+        events while still removing obvious outliers. Must be strictly
+        positive.
+    amp_sum_clip_sample_size:
+        Maximum number of events to keep in the sampling reservoir when
+        estimating the percentile. Larger values provide a more accurate
+        threshold at the cost of additional I/O and memory. Set to a
+        non-positive value to sample all events (not recommended for very
+        large datasets).
     summary_fn:
         Custom callable that receives the point array of shape
         ``(num_hits, num_features)`` and a mapping from feature name to
@@ -107,6 +129,9 @@ class DualReadoutEventDataset(Dataset):
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
         depth_key: Optional[str] = "z",
         time_key: Optional[str] = "t",
+        amp_sum_clip_percentile: Optional[float] = 0.999,
+        amp_sum_clip_multiplier: float = 1.5,
+        amp_sum_clip_sample_size: int = 16_384,
         summary_fn: Optional[SummaryFn] = None,
         class_names: Optional[Sequence[str]] = None,
         cache_file_handles: bool = True,
@@ -129,6 +154,11 @@ class DualReadoutEventDataset(Dataset):
         self.summary_fn = summary_fn or self._default_summary
         self.cache_file_handles = cache_file_handles
 
+        self._amp_sum_clip_percentile = amp_sum_clip_percentile
+        self._amp_sum_clip_multiplier = amp_sum_clip_multiplier
+        self._amp_sum_clip_sample_size = amp_sum_clip_sample_size
+        self._amp_sum_threshold: float = float("inf")
+
         self._file_handles: MutableMapping[int, h5py.File] = {}
         self._indices: List[Tuple[int, int]] = []
 
@@ -138,6 +168,7 @@ class DualReadoutEventDataset(Dataset):
             self.classes = self._discover_classes()
         self.class_to_index: Mapping[str, int] = {name: i for i, name in enumerate(self.classes)}
 
+        self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
         self._build_index()
 
     # ------------------------------------------------------------------
@@ -189,10 +220,93 @@ class DualReadoutEventDataset(Dataset):
 
     def _build_index(self) -> None:
         self._indices.clear()
+        filter_amp = self.amp_sum_key in self.hit_features
+        threshold = self._amp_sum_threshold
+
         for file_id, file_path in enumerate(self.files):
             with h5py.File(file_path, "r") as handle:
                 num_events = len(handle[self.label_key])
-            self._indices.extend((file_id, event_id) for event_id in range(num_events))
+
+                if not filter_amp or self.amp_sum_key not in handle:
+                    self._indices.extend((file_id, event_id) for event_id in range(num_events))
+                    continue
+
+                amp_dataset = handle[self.amp_sum_key]
+                if num_events == 0:
+                    continue
+
+                chunk_size = min(max(num_events // 32, 1), 1024)
+                for start in range(0, num_events, chunk_size):
+                    stop = min(start + chunk_size, num_events)
+                    amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
+                    finite = np.isfinite(amp_chunk)
+                    sanitized = np.where(finite, amp_chunk, 0.0)
+
+                    if amp_chunk.ndim == 1:
+                        finite_rows = finite
+                        totals = sanitized.astype(np.float64)
+                    else:
+                        finite_rows = np.all(finite, axis=1)
+                        totals = np.sum(sanitized, axis=1, dtype=np.float64)
+
+                    keep_mask = np.logical_and(finite_rows, totals <= threshold)
+                    for offset, keep in enumerate(keep_mask):
+                        if keep:
+                            self._indices.append((file_id, start + offset))
+
+    def _estimate_amplitude_sum_threshold(self) -> float:
+        """Estimate a robust amplitude sum threshold for masking outliers."""
+
+        percentile = self._amp_sum_clip_percentile
+        if percentile is None or percentile <= 0:
+            return float("inf")
+        if not (0.0 < percentile < 1.0):
+            raise ValueError("amp_sum_clip_percentile must lie in (0, 1)")
+
+        if self.amp_sum_key not in self.feature_to_index:
+            return float("inf")
+
+        sample_size = self._amp_sum_clip_sample_size
+        rng = np.random.default_rng(12345)
+        reservoir: List[float] = []
+        seen = 0
+
+        for file_path in self.files:
+            with h5py.File(file_path, "r") as handle:
+                dataset = handle[self.amp_sum_key]
+                if dataset.shape[0] == 0:
+                    continue
+                chunk_size = min(max(dataset.shape[0] // 32, 1), 1024)
+                for start in range(0, dataset.shape[0], chunk_size):
+                    stop = min(start + chunk_size, dataset.shape[0])
+                    chunk = np.asarray(dataset[start:stop], dtype=np.float64)
+                    chunk = np.where(np.isfinite(chunk), chunk, 0.0)
+                    sums = np.sum(chunk, axis=1)
+                    for value in sums:
+                        seen += 1
+                        if sample_size is not None and sample_size > 0:
+                            if len(reservoir) < sample_size:
+                                reservoir.append(float(value))
+                            else:
+                                j = int(rng.integers(0, seen))
+                                if j < sample_size:
+                                    reservoir[j] = float(value)
+                        else:
+                            reservoir.append(float(value))
+
+        if not reservoir:
+            return float("inf")
+
+        baseline = float(np.quantile(np.asarray(reservoir, dtype=np.float64), percentile))
+        if not np.isfinite(baseline):
+            return float("inf")
+        multiplier = self._amp_sum_clip_multiplier
+        if multiplier <= 0:
+            raise ValueError("amp_sum_clip_multiplier must be positive")
+        threshold = baseline * multiplier
+        if threshold <= 0:
+            return float("inf")
+        return threshold
 
     def _get_handle(self, file_id: int) -> h5py.File:
         if not self.cache_file_handles:
