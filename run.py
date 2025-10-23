@@ -232,6 +232,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional path to dump the training/validation metrics as JSON",
     )
     misc_group.add_argument(
+        "--metrics_json",
+        type=Path,
+        default=None,
+        help="Optional path to dump the evaluation metrics as JSON",
+    )
+    misc_group.add_argument(
+        "--config_json",
+        type=Path,
+        default=None,
+        help="Optional path to dump the resolved CLI arguments as JSON",
+    )
+    misc_group.add_argument(
         "--eval_only",
         action="store_true",
         help="Skip training and only run evaluation using the provided checkpoint",
@@ -242,6 +254,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Print a torchinfo overview of the model before training",
     )
     misc_group.add_argument(
+        "--instance_name",
+        type=str,
+        default=None,
+        help=(
+            "Optional identifier used to derive default artifact paths for the "
+            "checkpoint, training history and evaluation metrics"
+        ),
+    )
+    args = parser.parse_args(argv)
         "--test_outputs",
         type=Path,
         default=None,
@@ -251,7 +272,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args(argv)
+    if args.instance_name:
+        base_dir = Path("runs") / args.instance_name
+        if args.history_json is None:
+            args.history_json = base_dir / "history.json"
+        if args.checkpoint is None:
+            args.checkpoint = base_dir / "checkpoint.pt"
+        if args.metrics_json is None:
+            args.metrics_json = base_dir / "metrics.json"
+        if args.config_json is None:
+            args.config_json = base_dir / "config.json"
+
+    return args
 
 
 def _split_dataset(
@@ -552,6 +584,31 @@ def maybe_save_history(history: Dict[str, Iterable[Dict[str, float]]], path: Pat
     path.write_text(json.dumps(serialisable, indent=2))
 
 
+def maybe_save_metrics(metrics: Dict[str, Dict[str, float]], path: Path | None) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metrics, indent=2))
+
+
+def _serialise_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_serialise_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serialise_value(val) for key, val in value.items()}
+    return value
+
+
+def maybe_save_config(args: argparse.Namespace, path: Path | None) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {key: _serialise_value(value) for key, value in vars(args).items()}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, path: Path | None) -> None:
     if path is None or not path.exists():
         return
@@ -563,6 +620,8 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 def main() -> None:
     args = parse_args()
+
+    maybe_save_config(args, args.config_json)
 
     device = torch.device(args.device)
 
@@ -616,6 +675,7 @@ def main() -> None:
             else:
                 metrics[split] = trainer.evaluate(loader)
         print(json.dumps(metrics, indent=2))
+        maybe_save_metrics(metrics, args.metrics_json)
         if test_outputs is not None:
             _write_test_outputs(test_outputs, args.test_outputs)
         return
@@ -634,7 +694,7 @@ def main() -> None:
         evaluation_loaders["test"] = test_loader
     if not evaluation_loaders:
         evaluation_loaders["train"] = train_loader
-
+  
     metrics: Dict[str, Any] = {}
     test_outputs = None
     for split, loader in evaluation_loaders.items():
@@ -644,6 +704,7 @@ def main() -> None:
         else:
             metrics[split] = trainer.evaluate(loader)
     print(json.dumps(metrics, indent=2))
+    maybe_save_metrics(metrics, args.metrics_json)
     if test_outputs is not None:
         _write_test_outputs(test_outputs, args.test_outputs)
 
