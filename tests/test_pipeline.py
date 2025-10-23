@@ -114,6 +114,30 @@ def test_trainer_step(pipeline_dataset):
     assert "accuracy" in metrics
 
 
+def test_trainer_evaluate_outputs(pipeline_dataset):
+    dataset = pipeline_dataset
+    loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
+    summary_dim = dataset[0].summary.shape[-1]
+    num_classes = len(dataset.classes)
+    model = PointSetMLP(in_channels=dataset[0].points.shape[-1], summary_dim=summary_dim, num_classes=num_classes)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(epochs=1, log_every=1, use_amp=False),
+    )
+    metrics, outputs = trainer.evaluate(loader, return_outputs=True)
+    assert isinstance(metrics, dict)
+    assert isinstance(outputs, list)
+    assert len(outputs) == len(dataset)
+    first_record = outputs[0]
+    assert first_record["event_index"] == 0
+    assert "event_id" in first_record
+    assert "energy_pred" in first_record
+    assert "logits" in first_record
+
+
 def test_build_datasets_auto_split(dummy_h5):
     args = argparse.Namespace(
         train_files=[dummy_h5],

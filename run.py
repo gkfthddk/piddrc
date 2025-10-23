@@ -34,6 +34,16 @@ MODEL_REGISTRY = {
 }
 
 
+def _write_test_outputs(records: Sequence[Dict[str, Any]], destination: Path | None) -> None:
+    """Persist per-event evaluation outputs to JSON in a compact form."""
+
+    output_path = destination or Path("test_outputs.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(records, handle, separators=(",", ":"), ensure_ascii=False)
+        handle.write("\n")
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     gpus_parser = argparse.ArgumentParser(add_help=False)
     gpus_parser.add_argument(
@@ -230,6 +240,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--model_summary",
         action="store_true",
         help="Print a torchinfo overview of the model before training",
+    )
+    misc_group.add_argument(
+        "--test_outputs",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to save per-event model outputs when evaluating the test set. "
+            "When omitted, 'test_outputs.json' is used."
+        ),
     )
 
     return parser.parse_args(argv)
@@ -586,8 +605,19 @@ def main() -> None:
             eval_targets.setdefault("val", val_loader)
         if not eval_targets:
             eval_targets["train"] = train_loader
-        metrics = {split: trainer.evaluate(loader) for split, loader in eval_targets.items()}
+        metrics: Dict[str, Any] = {}
+        test_outputs = None
+        for split, loader in eval_targets.items():
+            if split == "test":
+                split_metrics, test_outputs = trainer.evaluate(
+                    loader, return_outputs=True
+                )
+                metrics[split] = split_metrics
+            else:
+                metrics[split] = trainer.evaluate(loader)
         print(json.dumps(metrics, indent=2))
+        if test_outputs is not None:
+            _write_test_outputs(test_outputs, args.test_outputs)
         return
 
     if args.checkpoint is not None:
@@ -605,8 +635,17 @@ def main() -> None:
     if not evaluation_loaders:
         evaluation_loaders["train"] = train_loader
 
-    metrics = {split: trainer.evaluate(loader) for split, loader in evaluation_loaders.items()}
+    metrics: Dict[str, Any] = {}
+    test_outputs = None
+    for split, loader in evaluation_loaders.items():
+        if split == "test":
+            split_metrics, test_outputs = trainer.evaluate(loader, return_outputs=True)
+            metrics[split] = split_metrics
+        else:
+            metrics[split] = trainer.evaluate(loader)
     print(json.dumps(metrics, indent=2))
+    if test_outputs is not None:
+        _write_test_outputs(test_outputs, args.test_outputs)
 
 
 if __name__ == "__main__":
