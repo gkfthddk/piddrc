@@ -78,3 +78,32 @@ def test_amplitude_sum_masking(overflow_h5):
 
     assert sorted(seen_event_ids) == [0, 1, 2]
 
+
+def test_cache_file_handles_disabled_does_not_leak(overflow_h5):
+    dataset = DualReadoutEventDataset(
+        [str(overflow_h5)],
+        hit_features=(
+            "DRcalo3dHits.amplitude_sum",
+            "DRcalo3dHits.type",
+            "DRcalo3dHits.time",
+            "DRcalo3dHits.time_end",
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        max_points=None,
+        amp_sum_clip_percentile=None,
+        cache_file_handles=False,
+    )
+
+    def open_file_count() -> int:
+        return len(h5py.h5f.get_obj_ids(types=h5py.h5f.OBJ_FILE))
+
+    baseline = open_file_count()
+
+    for i in range(8):
+        _ = dataset[i % len(dataset)]
+        assert open_file_count() == baseline
+

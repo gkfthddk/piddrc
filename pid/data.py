@@ -8,8 +8,9 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -179,8 +180,10 @@ class DualReadoutEventDataset(Dataset):
 
     def __getitem__(self, index: int) -> EventRecord:
         file_id, event_id = self._indices[index]
-        handle = self._get_handle(file_id)
+        with self._get_handle(file_id) as handle:
+            return self._load_event(handle, file_id, event_id)
 
+    def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
         hits = [np.asarray(handle[feature][event_id], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
         if self.max_points is not None and points.shape[0] > self.max_points:
@@ -308,12 +311,15 @@ class DualReadoutEventDataset(Dataset):
             return float("inf")
         return threshold
 
-    def _get_handle(self, file_id: int) -> h5py.File:
+    @contextmanager
+    def _get_handle(self, file_id: int) -> Iterator[h5py.File]:
         if not self.cache_file_handles:
-            return h5py.File(self.files[file_id], "r")
+            with h5py.File(self.files[file_id], "r") as handle:
+                yield handle
+            return
         if file_id not in self._file_handles:
             self._file_handles[file_id] = h5py.File(self.files[file_id], "r")
-        return self._file_handles[file_id]
+        yield self._file_handles[file_id]
 
     def close(self) -> None:
         for handle in self._file_handles.values():

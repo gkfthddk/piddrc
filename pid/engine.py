@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -84,13 +85,31 @@ class Trainer:
                 self.scheduler.step()
         return history
 
-    def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:
-        return self._run_epoch(data_loader, training=False, epoch=None)
+    def evaluate(
+        self, data_loader: DataLoader, *, return_outputs: bool = False
+    ) -> Union[Dict[str, float], Tuple[Dict[str, float], List[Dict[str, Any]]]]:
+        result = self._run_epoch(
+            data_loader,
+            training=False,
+            epoch=None,
+            collect_outputs=return_outputs,
+        )
+        if return_outputs:
+            metrics, outputs = result  # type: ignore[misc]
+            return metrics, outputs
+        return result
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _run_epoch(self, data_loader: DataLoader, *, training: bool, epoch: Optional[int]) -> Dict[str, float]:
+    def _run_epoch(
+        self,
+        data_loader: DataLoader,
+        *,
+        training: bool,
+        epoch: Optional[int],
+        collect_outputs: bool = False,
+    ) -> Union[Dict[str, float], Tuple[Dict[str, float], List[Dict[str, Any]]]]:
         mode = "train" if training else "eval"
         self.model.train(mode == "train")
         iterator = tqdm(data_loader, desc=f"{mode} epoch {epoch}" if epoch else mode, leave=False)
@@ -102,14 +121,19 @@ class Trainer:
         energy_pred: List[torch.Tensor] = []
         energy_true: List[torch.Tensor] = []
         log_sigma_list: List[torch.Tensor] = []
+        event_id_list: List[torch.Tensor] = []
         sigma_values: List[float] = []
+
+        autocast_enabled = self.scaler.is_enabled()
 
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
-            with torch.amp.autocast('cuda',enabled=self.scaler.is_enabled()):
-                outputs = self.model(batch)
-                loss_cls, loss_reg = self._compute_losses(outputs, batch)
-                loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
+            grad_context = nullcontext() if training else torch.no_grad()
+            with grad_context:
+                with torch.amp.autocast('cuda',enabled=autocast_enabled):
+                    outputs = self.model(batch)
+                    loss_cls, loss_reg = self._compute_losses(outputs, batch)
+                    loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
 
             if training:
                 self._global_step += 1
@@ -129,6 +153,8 @@ class Trainer:
             labels_list.append(batch["labels"].detach().cpu())
             energy_pred.append(outputs.energy.detach().cpu())
             energy_true.append(batch["energy"].detach().cpu())
+            if collect_outputs:
+                event_id_list.append(batch["event_id"].detach().cpu())
             if outputs.log_sigma is not None:
                 log_sigma = outputs.log_sigma.detach()
                 log_sigma_list.append(log_sigma.cpu())
@@ -163,7 +189,37 @@ class Trainer:
         })
         metrics["classification_loss"] = metrics["loss_cls"]
         metrics["regression_loss"] = metrics["loss_reg"]
-        return metrics
+
+        if not collect_outputs:
+            return metrics
+
+        logits = torch.cat(list(logits_list))
+        labels = torch.cat(list(labels_list))
+        energy_p = torch.cat(list(energy_pred))
+        energy_t = torch.cat(list(energy_true))
+
+        output_records: List[Dict[str, Any]] = []
+        event_ids = (
+            torch.cat(event_id_list)
+            if event_id_list
+            else torch.empty(0, 2, dtype=torch.long)
+        )
+        log_sigma_tensor = torch.cat(list(log_sigma_list)) if log_sigma_list else None
+
+        for idx in range(logits.shape[0]):
+            record: Dict[str, Any] = {
+                "event_index": idx,
+                "event_id": event_ids[idx].tolist() if idx < event_ids.shape[0] else [],
+                "label": int(labels[idx].item()),
+                "logits": logits[idx].tolist(),
+                "energy_pred": float(energy_p[idx].item()),
+                "energy_true": float(energy_t[idx].item()),
+            }
+            if log_sigma_tensor is not None:
+                record["log_sigma"] = float(log_sigma_tensor[idx].item())
+            output_records.append(record)
+
+        return metrics, output_records
 
     def _apply_warmup(self) -> None:
         warmup_steps = self.config.warmup_steps
