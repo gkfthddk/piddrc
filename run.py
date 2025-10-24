@@ -266,9 +266,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Print a torchinfo overview of the model before training",
     )
     misc_group.add_argument(
-        "--instance_name",
+        "--name",
         type=str,
-        default=None,
+        default="test",
         help=(
             "Optional identifier used to derive default artifact paths for the "
             "checkpoint, training history and evaluation metrics"
@@ -285,8 +285,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
 
-    if args.instance_name:
-        base_dir = Path("runs") / args.instance_name
+    if args.name:
+        base_dir = Path("save") / args.name
         if args.history_json is None:
             args.history_json = base_dir / "history.json"
         if args.checkpoint is None:
@@ -455,7 +455,7 @@ def print_dataset_summary(
 
     base_event_count = len(base_dataset)
     hit_features = ", ".join(base_dataset.hit_features)
-    class_names = ", ".join(base_dataset.classes)
+    class_names = ", ".join([str(c) for c in base_dataset.classes])
     summary_dim = base_dataset[0].summary.numel() if base_event_count > 0 else 0
 
     print("Dataset summary:")

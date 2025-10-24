@@ -403,12 +403,14 @@ class H5FileProcessor:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Merge HDF5 files and optionally compute statistics.")
+    parser.add_argument("--reco_base", type=str, default="/users/yulee/dream/tools/reco", help="Set reco_base_path.")
+    parser.add_argument("--ouput_dir", type=str, default="h5s", help="Set output_h5_dir.")
     parser.add_argument("--compute_stats", action="store_true", help="Enable computation of channel statistics.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
     args = parser.parse_args()
 
-    reco_base_path = Path("/users/yulee/dream/tools/reco")
-    output_h5_dir = Path("h5s")
+    reco_base_path = Path(args.reco_base)
+    output_h5_dir = Path(args.output_dir)
 
     processor = H5FileProcessor(reco_base_path, output_h5_dir, compute_stats=args.compute_stats)
 

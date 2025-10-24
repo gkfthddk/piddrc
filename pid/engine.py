@@ -113,7 +113,7 @@ class Trainer:
     ) -> Union[Dict[str, float], Tuple[Dict[str, float], List[Dict[str, Any]]]]:
         mode = "train" if training else "eval"
         self.model.train(mode == "train")
-        iterator = tqdm(data_loader, desc=f"{mode} epoch {epoch}" if epoch else mode, leave=False)
+        iterator = tqdm(data_loader, desc=f"{mode} epoch {epoch}" if epoch else mode, leave=(mode == "train"))
         losses: List[float] = []
         cls_losses: List[float] = []
         reg_losses: List[float] = []
@@ -161,7 +161,7 @@ class Trainer:
                 log_sigma_list.append(log_sigma.cpu())
                 sigma_values.append(float(torch.exp(log_sigma).mean().item()))
 
-            if training and step % self.config.log_every == 0:
+            if step % self.config.log_every == 0:
                 postfix = {
                     "loss": sum(losses) / len(losses),
                     "reg": sum(reg_losses) / len(reg_losses),
@@ -274,7 +274,7 @@ class Trainer:
         metrics["regression_mse"] = float(torch.mean((energy_p - energy_t) ** 2).item())
         if log_sigma_list is not None:
             log_sigma = torch.cat(list(log_sigma_list))
-            metrics["regression_expected_sigma"] = float(torch.exp(log_sigma).mean().item())
+            metrics["regression_sigma"] = float(torch.exp(log_sigma).mean().item())
         slope, intercept = metrics_mod.energy_linearity(energy_p, energy_t)
         metrics["linearity_slope"] = slope
         metrics["linearity_intercept"] = intercept
