@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import torch
 torch.set_num_threads(16)
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
 from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
 from pid.data import EventRecord
@@ -444,6 +444,45 @@ def build_datasets(
     return base_dataset, train_dataset, val_dataset, test_dataset
 
 
+def print_dataset_summary(
+    base_dataset: DualReadoutEventDataset,
+    train_dataset: Dataset[EventRecord],
+    val_dataset: Dataset[EventRecord] | None,
+    test_dataset: Dataset[EventRecord] | None,
+) -> None:
+    """Log a concise overview of the configured datasets."""
+
+    base_event_count = len(base_dataset)
+    hit_features = ", ".join(base_dataset.hit_features)
+    class_names = ", ".join(base_dataset.classes)
+    summary_dim = base_dataset[0].summary.numel() if base_event_count > 0 else 0
+
+    print("Dataset summary:")
+    print(f"  Training files: {len(base_dataset.files)}")
+    print(f"  Base events: {base_event_count:,}")
+    print(f"  Hit features ({len(base_dataset.hit_features)}): {hit_features}")
+    print(f"  Summary dimension: {summary_dim}")
+    print(f"  Classes ({len(base_dataset.classes)}): {class_names}")
+    max_points = getattr(base_dataset, "max_points", None)
+    print("  Max points per event: {}".format(max_points if max_points is not None else "unbounded"))
+
+    def _describe_split(name: str, dataset: Dataset[EventRecord] | None) -> None:
+        if dataset is None:
+            print(f"    {name:<5}: not provided")
+            return
+        size = len(dataset)
+        details = [f"{size:,} events"]
+        if isinstance(dataset, Subset) and base_event_count > 0:
+            fraction = size / base_event_count
+            details.append(f"{fraction:.1%} of base")
+        print(f"    {name:<5}: {', '.join(details)}")
+
+    print("  Splits:")
+    _describe_split("train", train_dataset)
+    _describe_split("val", val_dataset)
+    _describe_split("test", test_dataset)
+
+
 def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> nn.Module:
     model_name = args.model.lower()
     model_cls = MODEL_REGISTRY[model_name]
@@ -643,6 +682,7 @@ def main() -> None:
     device = torch.device(args.device)
 
     base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
+    print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
     model = build_model(args, base_dataset)
     model.to(device)
 
