@@ -196,10 +196,16 @@ class H5FileProcessor:
         data_dict = {}
         try:
             with h5py.File(file_name, 'r') as f:
+                missing_datasets = [name for name in dataset_names if name not in f]
+                if missing_datasets:
+                    logger.warning(
+                        "Missing datasets %s in %s. Skipping entire file to preserve alignment.",
+                        missing_datasets,
+                        file_name,
+                    )
+                    return file_name, None
+
                 for dataset_name in dataset_names:
-                    if dataset_name not in f:
-                        logger.warning(f"Dataset '{dataset_name}' not found in {file_name}. Skipping.")
-                        continue
                     # Use np.take for efficient indexing, especially with large datasets
                     data_dict[dataset_name] = np.take(f[dataset_name], indices, axis=0)
             return file_name, data_dict
