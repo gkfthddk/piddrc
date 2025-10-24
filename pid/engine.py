@@ -81,7 +81,9 @@ class Trainer:
                             break
 
             if self.scheduler is not None:
-                self.scheduler.step()
+                warmup_steps = self.config.warmup_steps
+                if warmup_steps <= 0 or self._global_step >= warmup_steps:
+                    self.scheduler.step()
         return history
 
     def evaluate(
