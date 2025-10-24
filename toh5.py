@@ -358,46 +358,46 @@ class H5FileProcessor:
 
         # Setup multiprocessing for reading and writing
         print_memory_usage('Start merge')
-    manager = multiprocessing.Manager()
-    data_queue = manager.Queue(maxsize=40) # Queue for data chunks
-    stats_dict_proxy = manager.dict() if self.compute_stats else None
+        manager = multiprocessing.Manager()
+        data_queue = manager.Queue(maxsize=40) # Queue for data chunks
+        stats_dict_proxy = manager.dict() if self.compute_stats else None
 
         # Start reader processes
-    reader_processes: List[multiprocessing.Process] = []
-    chunk_size = len(valid_files) // num_reader_processes + 1
-    for i in range(num_reader_processes):
-        sub_list = valid_files[i * chunk_size:(i + 1) * chunk_size]
-        if not sub_list:
-            continue
-        p = multiprocessing.Process(
-            target=self._reader_worker,
-            args=(sub_list, self.write_keys, data_queue)
-        )
-        reader_processes.append(p)
-        p.start()
+        reader_processes: List[multiprocessing.Process] = []
+        chunk_size = len(valid_files) // num_reader_processes + 1
+        for i in range(num_reader_processes):
+            sub_list = valid_files[i * chunk_size:(i + 1) * chunk_size]
+            if not sub_list:
+                continue
+            p = multiprocessing.Process(
+                target=self._reader_worker,
+                args=(sub_list, self.write_keys, data_queue)
+            )
+            reader_processes.append(p)
+            p.start()
 
         # Start writer process
-    writer_process = multiprocessing.Process(
-        target=self._writer_worker,
-        args=(data_queue, output_file, len(valid_files), stats_dict_proxy)
-    )
-    writer_process.start()
+        writer_process = multiprocessing.Process(
+            target=self._writer_worker,
+            args=(data_queue, output_file, len(valid_files), stats_dict_proxy)
+        )
+        writer_process.start()
 
         # Wait for reader processes to finish
-    for p in reader_processes:
-        p.join()
-    logger.info("All reader processes finished.")
+        for p in reader_processes:
+            p.join()
+        logger.info("All reader processes finished.")
 
         # Send sentinel value to stop the writer process
-    data_queue.put((None, None))
-    writer_process.join()
-    logger.info("Writer process finished.")
+        data_queue.put((None, None))
+        writer_process.join()
+        logger.info("Writer process finished.")
 
-    if self.compute_stats: # stats_dict_proxy is guaranteed to be a manager.dict() if compute_stats is True
-        self._save_stats_to_h5(output_file, dict(stats_dict_proxy)) # Convert Manager.dict to a regular dict
+        if self.compute_stats: # stats_dict_proxy is guaranteed to be a manager.dict() if compute_stats is True
+            self._save_stats_to_h5(output_file, dict(stats_dict_proxy)) # Convert Manager.dict to a regular dict
 
-    print_memory_usage(f"Finished processing {sample_name}")
-    gc.collect() # Final garbage collection
+        print_memory_usage(f"Finished processing {sample_name}")
+        gc.collect() # Final garbage collection
 
 # Main execution block
 def main():
