@@ -209,6 +209,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--epochs", type=int, default=100)
     train_group.add_argument("--learning_rate", type=float, default=3e-4)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
+    train_group.add_argument("--lr_scheduler", type=str, default=None)
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
     train_group.add_argument("--no_amp", action="store_true", help="Disable automatic mixed precision")
@@ -570,6 +571,7 @@ def configure_trainer(
     log_every: int,
     max_grad_norm: float | None,
     use_amp: bool,
+    lr_scheduler_name: str | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     config = TrainingConfig(
@@ -578,7 +580,14 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
     )
-    trainer = Trainer(model=model, optimizer=optimizer, device=device, config=config)
+
+    scheduler = None
+    if lr_scheduler_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    trainer = Trainer(
+        model=model, optimizer=optimizer, scheduler=scheduler, device=device, config=config
+    )
     return trainer, optimizer
 
 
@@ -670,6 +679,7 @@ def main() -> None:
         log_every=args.log_every,
         max_grad_norm=args.max_grad_norm,
         use_amp=not args.no_amp,
+        lr_scheduler_name=args.lr_scheduler,
     )
 
     if args.checkpoint is not None and args.eval_only:

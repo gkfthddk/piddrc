@@ -35,8 +35,8 @@ def roc_auc(logits: torch.Tensor, labels: torch.Tensor) -> Optional[float]:
 
 
 def energy_resolution(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
-    pred_np = pred.detach().cpu().numpy()
-    target_np = target.detach().cpu().numpy()
+    pred_np = pred.detach().cpu().to(torch.float32).numpy()
+    target_np = target.detach().cpu().to(torch.float32).numpy()
     residual = pred_np - target_np
     with np.errstate(divide="ignore", invalid="ignore"):
         rel = np.where(np.abs(target_np) > 1e-6, residual / target_np, 0.0)
@@ -47,8 +47,8 @@ def energy_resolution(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, flo
 
 
 def energy_linearity(pred: torch.Tensor, target: torch.Tensor) -> Tuple[float, float]:
-    pred_np = pred.detach().cpu().numpy()
-    target_np = target.detach().cpu().numpy()
+    pred_np = pred.detach().cpu().to(torch.float32).numpy()
+    target_np = target.detach().cpu().to(torch.float32).numpy()
     if len(pred_np) < 2:
         return 1.0, 0.0
     slope, intercept = np.polyfit(target_np, pred_np, deg=1)

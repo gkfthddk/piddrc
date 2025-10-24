@@ -77,11 +77,10 @@ class Trainer:
                     else:
                         epochs_without_improvement += 1
                         if epochs_without_improvement >= self.config.early_stopping_patience:
+                            print(f"Early stopping triggered after {epoch} epochs.")
                             break
 
-            if self.scheduler is not None and (
-                self.config.warmup_steps <= 0 or self._global_step >= self.config.warmup_steps
-            ):
+            if self.scheduler is not None:
                 self.scheduler.step()
         return history
 
