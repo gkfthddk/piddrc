@@ -403,6 +403,8 @@ def build_datasets(
     balance_train_files = getattr(args, "balance_train_files", False)
     train_limit = getattr(args, "train_limit", None)
 
+    print("Preparing datasets...", flush=True)
+    print("  Loading training dataset", flush=True)
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
@@ -412,9 +414,11 @@ def build_datasets(
         balance_files=balance_train_files,
         max_events=train_limit,
     )
+    print("  Training dataset ready", flush=True)
 
     val_dataset = None
     if args.val_files:
+        print("  Loading validation dataset", flush=True)
         val_dataset = DualReadoutEventDataset(
             [str(path) for path in args.val_files],
             hit_features=args.hit_features,
@@ -423,9 +427,11 @@ def build_datasets(
             max_points=args.max_points,
             class_names=base_dataset.classes,
         )
+        print("  Validation dataset ready", flush=True)
 
     test_dataset = None
     if args.test_files:
+        print("  Loading test dataset", flush=True)
         test_dataset = DualReadoutEventDataset(
             [str(path) for path in args.test_files],
             hit_features=args.hit_features,
@@ -434,6 +440,7 @@ def build_datasets(
             max_points=args.max_points,
             class_names=base_dataset.classes,
         )
+        print("  Test dataset ready", flush=True)
 
     train_dataset: Dataset[EventRecord] = base_dataset
     need_val_split = val_dataset is None

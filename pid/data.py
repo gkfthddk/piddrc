@@ -8,6 +8,7 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -171,6 +172,11 @@ class DualReadoutEventDataset(Dataset):
             raise ValueError("max_events must be non-negative when provided")
         self._max_events = max_events
 
+        progress_flag = os.environ.get("PID_DATASET_PROGRESS", "1").strip().lower()
+        self._progress_enabled = progress_flag not in {"0", "false", "no", "off"}
+
+        self._log(f"Initializing dataset from {len(self.files)} file(s)")
+
         self._amp_sum_clip_percentile = amp_sum_clip_percentile
         self._amp_sum_clip_multiplier = amp_sum_clip_multiplier
         self._amp_sum_clip_sample_size = amp_sum_clip_sample_size
@@ -182,12 +188,21 @@ class DualReadoutEventDataset(Dataset):
         if class_names is not None:
             self.classes: Tuple[str, ...] = tuple(class_names)
         else:
+            self._log("Discovering label set across input files")
             self.classes = self._discover_classes()
         self.class_to_index: Mapping[str, int] = {name: i for i, name in enumerate(self.classes)}
 
+        self._log(f"Discovered {len(self.classes)} class(es)")
+
+        self._log("Estimating amplitude-sum threshold")
         self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
-        print("amp_sum_threshold",self._amp_sum_threshold)
+        if np.isfinite(self._amp_sum_threshold):
+            self._log(f"  Using threshold {self._amp_sum_threshold:,.3f}")
+        else:
+            self._log("  No finite threshold computed (disabled or insufficient data)")
+        self._log("Building event index")
         self._build_index()
+        self._log(f"Index contains {len(self._indices):,} event(s)")
 
     # ------------------------------------------------------------------
     # Dataset protocol implementation
@@ -231,6 +246,7 @@ class DualReadoutEventDataset(Dataset):
     def _discover_classes(self) -> Tuple[str, ...]:
         labels: List[str] = []
         for file_path in self.files:
+            self._log(f"  Reading labels from {file_path}")
             with h5py.File(file_path, "r") as handle:
                 data = handle[self.label_key][:]
                 decoded = [_decode_label(value) for value in data]
@@ -246,6 +262,9 @@ class DualReadoutEventDataset(Dataset):
         per_file_indices: List[List[Tuple[int, int]]] = []
 
         for file_id, file_path in enumerate(self.files):
+            self._log(
+                f"  Indexing file {file_id + 1}/{len(self.files)}: {file_path}"
+            )
             with h5py.File(file_path, "r") as handle:
                 num_events = len(handle[self.label_key])
 
@@ -275,8 +294,12 @@ class DualReadoutEventDataset(Dataset):
                         totals = np.sum(sanitized, axis=1, dtype=np.float64)
 
                     keep_mask = np.logical_and(finite_rows, totals <= threshold)
-                    if(len(keep_mask)!= np.sum(keep_mask)):
-                        print("File",file_path,"Events",start,"to",stop,"removed",np.sum(~keep_mask),"out of",len(keep_mask))
+                    if len(keep_mask) != int(np.sum(keep_mask)):
+                        removed = int(np.sum(~keep_mask))
+                        self._log(
+                            "    Removed "
+                            f"{removed} event(s) while scanning entries {start:,}-{stop - 1:,}"
+                        )
                     for offset, keep in enumerate(keep_mask):
                         if keep:
                             file_indices.append((file_id, start + offset))
@@ -310,6 +333,7 @@ class DualReadoutEventDataset(Dataset):
         seen = 0
 
         for file_path in self.files:
+            self._log(f"  Sampling amplitude sums from {file_path}")
             with h5py.File(file_path, "r") as handle:
                 dataset = handle[self.amp_sum_key]
                 if dataset.shape[0] == 0:
@@ -333,6 +357,7 @@ class DualReadoutEventDataset(Dataset):
                             reservoir.append(float(value))
 
         if not reservoir:
+            self._log("  No samples collected while estimating threshold")
             return float("inf")
 
         baseline = float(np.quantile(np.asarray(reservoir, dtype=np.float64), percentile))
@@ -345,6 +370,11 @@ class DualReadoutEventDataset(Dataset):
         if threshold <= 0:
             return float("inf")
         return threshold
+
+    def _log(self, message: str) -> None:
+        if not self._progress_enabled:
+            return
+        print(f"[DualReadoutEventDataset] {message}", flush=True)
 
     @contextmanager
     def _get_handle(self, file_id: int) -> Iterator[h5py.File]:
