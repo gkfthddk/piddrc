@@ -8,7 +8,6 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -127,6 +126,9 @@ class DualReadoutEventDataset(Dataset):
         filtering and (optional) balancing. When provided, each input file is
         truncated to at most this many events which is handy for quick smoke
         tests with a reduced sample size.
+    progress:
+        When ``False`` suppress informational progress messages that are printed
+        while the dataset scans the input files during initialization.
     """
 
     def __init__(
@@ -149,6 +151,7 @@ class DualReadoutEventDataset(Dataset):
         cache_file_handles: bool = True,
         balance_files: bool = False,
         max_events: Optional[int] = None,
+        progress: bool = True,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -172,8 +175,7 @@ class DualReadoutEventDataset(Dataset):
             raise ValueError("max_events must be non-negative when provided")
         self._max_events = max_events
 
-        progress_flag = os.environ.get("PID_DATASET_PROGRESS", "1").strip().lower()
-        self._progress_enabled = progress_flag not in {"0", "false", "no", "off"}
+        self._progress_enabled = progress
 
         self._log(f"Initializing dataset from {len(self.files)} file(s)")
 

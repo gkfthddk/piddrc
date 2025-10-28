@@ -137,6 +137,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Random seed used when splitting the training dataset",
     )
     io_group.add_argument(
+        "--no_dataset_progress",
+        dest="dataset_progress",
+        action="store_false",
+        help="Disable dataset initialization progress messages",
+    )
+    io_group.add_argument(
         "--balance_train_files",
         action="store_true",
         help="Truncate each training file to match the smallest event count",
@@ -287,6 +293,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
+    parser.set_defaults(dataset_progress=True)
+
     args = parser.parse_args(argv)
 
     setattr(args, "instance_name", args.name)
@@ -402,6 +410,7 @@ def build_datasets(
 ]:
     balance_train_files = getattr(args, "balance_train_files", False)
     train_limit = getattr(args, "train_limit", None)
+    progress = getattr(args, "dataset_progress", True)
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
@@ -413,6 +422,7 @@ def build_datasets(
         max_points=args.max_points,
         balance_files=balance_train_files,
         max_events=train_limit,
+        progress=progress,
     )
     print("  Training dataset ready", flush=True)
 
@@ -426,6 +436,7 @@ def build_datasets(
             energy_key=args.energy_key,
             max_points=args.max_points,
             class_names=base_dataset.classes,
+            progress=progress,
         )
         print("  Validation dataset ready", flush=True)
 
@@ -439,6 +450,7 @@ def build_datasets(
             energy_key=args.energy_key,
             max_points=args.max_points,
             class_names=base_dataset.classes,
+            progress=progress,
         )
         print("  Test dataset ready", flush=True)
 
