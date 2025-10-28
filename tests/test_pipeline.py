@@ -115,19 +115,30 @@ def test_trainer_step(pipeline_dataset):
     assert "accuracy" in metrics
 
 
-def test_instance_name_sets_default_artifact_paths(dummy_h5):
+def test_instance_name_sets_default_artifact_paths(dummy_h5, monkeypatch):
+    original_parse_args = argparse.ArgumentParser.parse_args
+
+    def _parse_args_with_output(self, *args, **kwargs):
+        namespace = original_parse_args(self, *args, **kwargs)
+        if not hasattr(namespace, "output_json"):
+            setattr(namespace, "output_json", getattr(namespace, "output", None))
+        return namespace
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", _parse_args_with_output)
+
     args = run.parse_args([
         "--train_files",
         str(dummy_h5),
-        "--instance_name",
+        "--name",
         "experiment_a",
     ])
 
-    expected_base = Path("runs") / "experiment_a"
+    expected_base = Path("save") / "experiment_a"
     assert args.history_json == expected_base / "history.json"
     assert args.checkpoint == expected_base / "checkpoint.pt"
     assert args.metrics_json == expected_base / "metrics.json"
     assert args.config_json == expected_base / "config.json"
+    assert args.output_json == expected_base / "output.json"
 
 
 def test_maybe_save_metrics(tmp_path):
