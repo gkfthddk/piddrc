@@ -127,14 +127,37 @@ class Trainer:
 
         autocast_enabled = self.scaler.is_enabled()
 
+        skipped_entries = 0
+
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
             grad_context = nullcontext() if training else torch.no_grad()
+            skip_step = False
+            effective_batch = batch
+            loss: Optional[torch.Tensor] = None
+            loss_cls: Optional[torch.Tensor] = None
+            loss_reg: Optional[torch.Tensor] = None
+
             with grad_context:
                 with torch.amp.autocast('cuda',enabled=autocast_enabled):
                     outputs = self.model(batch)
-                    loss_cls, loss_reg = self._compute_losses(outputs, batch)
-                    loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
+                    valid_mask = self._valid_entry_mask(outputs, batch)
+                    invalid_count = int((~valid_mask).sum().item())
+                    if invalid_count:
+                        skipped_entries += invalid_count
+                    if valid_mask.sum().item() == 0:
+                        skip_step = True
+                    else:
+                        if not torch.all(valid_mask):
+                            outputs = self._mask_outputs(outputs, valid_mask)
+                            effective_batch = self._mask_batch(batch, valid_mask)
+                        loss_cls, loss_reg = self._compute_losses(outputs, effective_batch)
+                        loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
+
+            if skip_step:
+                continue
+
+            assert loss is not None and loss_cls is not None and loss_reg is not None
 
             if training:
                 self._global_step += 1
@@ -151,11 +174,11 @@ class Trainer:
             cls_losses.append(loss_cls.detach().item())
             reg_losses.append(loss_reg.detach().item())
             logits_list.append(outputs.logits.detach().cpu())
-            labels_list.append(batch["labels"].detach().cpu())
+            labels_list.append(effective_batch["labels"].detach().cpu())
             energy_pred.append(outputs.energy.detach().cpu())
-            energy_true.append(batch["energy"].detach().cpu())
-            if collect_outputs:
-                event_id_list.append(batch["event_id"].detach().cpu())
+            energy_true.append(effective_batch["energy"].detach().cpu())
+            if collect_outputs and "event_id" in effective_batch:
+                event_id_list.append(effective_batch["event_id"].detach().cpu())
             if outputs.log_sigma is not None:
                 log_sigma = outputs.log_sigma.detach()
                 log_sigma_list.append(log_sigma.cpu())
@@ -183,6 +206,7 @@ class Trainer:
             energy_true,
             log_sigma_list if log_sigma_list else None,
         )
+        metrics["invalid_entries"] = float(skipped_entries)
         metrics.update({
             "loss": float(sum(losses) / max(len(losses), 1)),
             "loss_cls": float(sum(cls_losses) / max(len(cls_losses), 1)),
@@ -193,6 +217,9 @@ class Trainer:
 
         if not collect_outputs:
             return metrics
+
+        if not logits_list:
+            return metrics, []
 
         logits = torch.cat(list(logits_list))
         labels = torch.cat(list(labels_list))
@@ -256,10 +283,32 @@ class Trainer:
         energy_true: Iterable[torch.Tensor],
         log_sigma_list: Optional[Iterable[torch.Tensor]] = None,
     ) -> Dict[str, float]:
-        logits = torch.cat(list(logits_list))
-        labels = torch.cat(list(labels_list))
-        energy_p = torch.cat(list(energy_pred))
-        energy_t = torch.cat(list(energy_true))
+        logits_tensors = list(logits_list)
+        labels_tensors = list(labels_list)
+        energy_pred_tensors = list(energy_pred)
+        energy_true_tensors = list(energy_true)
+        log_sigma_tensors = list(log_sigma_list) if log_sigma_list is not None else None
+
+        if not logits_tensors:
+            metrics: Dict[str, float] = {
+                "accuracy": float("nan"),
+                "energy_resolution": float("nan"),
+                "energy_rmse": float("nan"),
+                "energy_bias": float("nan"),
+                "regression_mse": float("nan"),
+                "linearity_slope": float("nan"),
+                "linearity_intercept": float("nan"),
+            }
+            metrics["roc_auc"] = float("nan")
+            metrics["classification_auc"] = float("nan")
+            if log_sigma_tensors is not None:
+                metrics["regression_sigma"] = float("nan")
+            return metrics
+
+        logits = torch.cat(logits_tensors)
+        labels = torch.cat(labels_tensors)
+        energy_p = torch.cat(energy_pred_tensors)
+        energy_t = torch.cat(energy_true_tensors)
 
         metrics: Dict[str, float] = {}
         metrics["accuracy"] = metrics_mod.accuracy(logits, labels)
@@ -272,13 +321,51 @@ class Trainer:
         metrics["energy_rmse"] = resolution["rmse"]
         metrics["energy_bias"] = resolution["bias"]
         metrics["regression_mse"] = float(torch.mean((energy_p - energy_t) ** 2).item())
-        if log_sigma_list is not None:
-            log_sigma = torch.cat(list(log_sigma_list))
+        if log_sigma_tensors is not None:
+            log_sigma = torch.cat(log_sigma_tensors)
             metrics["regression_sigma"] = float(torch.exp(log_sigma).mean().item())
         slope, intercept = metrics_mod.energy_linearity(energy_p, energy_t)
         metrics["linearity_slope"] = slope
         metrics["linearity_intercept"] = intercept
         return metrics
+
+    def _valid_entry_mask(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        logits = outputs.logits
+        if logits.ndim > 1:
+            logits_finite = torch.isfinite(logits).all(dim=-1)
+        else:
+            logits_finite = torch.isfinite(logits)
+        energy_finite = torch.isfinite(outputs.energy) & torch.isfinite(batch["energy"])
+        mask = logits_finite & energy_finite
+        if outputs.log_sigma is not None:
+            mask = mask & torch.isfinite(outputs.log_sigma)
+        return mask
+
+    def _mask_outputs(self, outputs: ModelOutputs, mask: torch.Tensor) -> ModelOutputs:
+        mask = mask.to(dtype=torch.bool)
+        extras: Dict[str, torch.Tensor] = {}
+        for key, value in outputs.extras.items():
+            if isinstance(value, torch.Tensor) and value.shape and value.shape[0] == mask.shape[0]:
+                extras[key] = value[mask]
+            else:
+                extras[key] = value
+        log_sigma = outputs.log_sigma[mask] if outputs.log_sigma is not None else None
+        return ModelOutputs(
+            logits=outputs.logits[mask],
+            energy=outputs.energy[mask],
+            log_sigma=log_sigma,
+            extras=extras,
+        )
+
+    def _mask_batch(self, batch: Dict[str, torch.Tensor], mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+        mask = mask.to(dtype=torch.bool)
+        filtered: Dict[str, torch.Tensor] = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor) and value.shape and value.shape[0] == mask.shape[0]:
+                filtered[key] = value[mask]
+            else:
+                filtered[key] = value
+        return filtered
 
 
 __all__ = ["Trainer", "TrainingConfig"]
