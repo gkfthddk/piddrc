@@ -45,6 +45,9 @@ All models produce three outputs:
    )
 
    loader = DataLoader(dataset, batch_size=32, collate_fn=collate_events, shuffle=True)
+
+   # Pass progress=False to silence dataset initialization logs, or use
+   # ``python run.py --no_dataset_progress`` when working with the CLI.
    ```
 
 3. **Instantiate a model** and trainer:

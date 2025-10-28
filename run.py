@@ -137,6 +137,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Random seed used when splitting the training dataset",
     )
     io_group.add_argument(
+        "--no_dataset_progress",
+        dest="dataset_progress",
+        action="store_false",
+        help="Disable dataset initialization progress messages",
+    )
+    io_group.add_argument(
         "--balance_train_files",
         action="store_true",
         help="Truncate each training file to match the smallest event count",
@@ -287,6 +293,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
+    parser.set_defaults(dataset_progress=True)
+
     args = parser.parse_args(argv)
 
     setattr(args, "instance_name", args.name)
@@ -402,7 +410,10 @@ def build_datasets(
 ]:
     balance_train_files = getattr(args, "balance_train_files", False)
     train_limit = getattr(args, "train_limit", None)
+    progress = getattr(args, "dataset_progress", True)
 
+    print("Preparing datasets...", flush=True)
+    print("  Loading training dataset", flush=True)
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
@@ -411,10 +422,13 @@ def build_datasets(
         max_points=args.max_points,
         balance_files=balance_train_files,
         max_events=train_limit,
+        progress=progress,
     )
+    print("  Training dataset ready", flush=True)
 
     val_dataset = None
     if args.val_files:
+        print("  Loading validation dataset", flush=True)
         val_dataset = DualReadoutEventDataset(
             [str(path) for path in args.val_files],
             hit_features=args.hit_features,
@@ -422,10 +436,13 @@ def build_datasets(
             energy_key=args.energy_key,
             max_points=args.max_points,
             class_names=base_dataset.classes,
+            progress=progress,
         )
+        print("  Validation dataset ready", flush=True)
 
     test_dataset = None
     if args.test_files:
+        print("  Loading test dataset", flush=True)
         test_dataset = DualReadoutEventDataset(
             [str(path) for path in args.test_files],
             hit_features=args.hit_features,
@@ -433,7 +450,9 @@ def build_datasets(
             energy_key=args.energy_key,
             max_points=args.max_points,
             class_names=base_dataset.classes,
+            progress=progress,
         )
+        print("  Test dataset ready", flush=True)
 
     train_dataset: Dataset[EventRecord] = base_dataset
     need_val_split = val_dataset is None
