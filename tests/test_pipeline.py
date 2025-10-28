@@ -123,7 +123,7 @@ def test_instance_name_sets_default_artifact_paths(dummy_h5):
         "experiment_a",
     ])
 
-    expected_base = Path("runs") / "experiment_a"
+    expected_base = Path("save") / "experiment_a"
     assert args.history_json == expected_base / "history.json"
     assert args.checkpoint == expected_base / "checkpoint.pt"
     assert args.metrics_json == expected_base / "metrics.json"

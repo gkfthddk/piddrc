@@ -267,6 +267,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     misc_group.add_argument(
         "--name",
+        "--instance_name",
+        dest="name",
         type=str,
         default="test",
         help=(
@@ -276,6 +278,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     misc_group.add_argument(
         "--output",
+        "--output_json",
+        dest="output_json",
         type=Path,
         default=None,
         help=(
@@ -284,6 +288,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
+
+    setattr(args, "instance_name", args.name)
 
     if args.name:
         base_dir = Path("save") / args.name
@@ -297,6 +303,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
+
+    # Maintain compatibility with earlier versions that exposed args.output
+    setattr(args, "output", args.output_json)
 
     return args
 
@@ -679,7 +688,10 @@ def maybe_save_config(args: argparse.Namespace, path: Path | None) -> None:
 def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, path: Path | None) -> None:
     if path is None or not path.exists():
         return
-    payload = torch.load(path, map_location="cpu")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:  # pragma: no cover - PyTorch < 2.1 compatibility
+        payload = torch.load(path, map_location="cpu")
     model.load_state_dict(payload["model_state"])
     if "optimizer_state" in payload:
         optimizer.load_state_dict(payload["optimizer_state"])
