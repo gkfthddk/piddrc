@@ -273,8 +273,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     misc_group.add_argument(
         "--name",
-        "--instance_name",
-        dest="name",
         type=str,
         default="test",
         help=(
@@ -283,9 +281,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     misc_group.add_argument(
-        "--output",
         "--output_json",
-        dest="output_json",
         type=Path,
         default=None,
         help=(
@@ -311,9 +307,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
-
-    # Maintain compatibility with earlier versions that exposed args.output
-    setattr(args, "output", args.output_json)
 
     return args
 
