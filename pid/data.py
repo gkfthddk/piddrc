@@ -186,6 +186,7 @@ class DualReadoutEventDataset(Dataset):
         self.class_to_index: Mapping[str, int] = {name: i for i, name in enumerate(self.classes)}
 
         self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        print("amp_sum_threshold",self._amp_sum_threshold)
         self._build_index()
 
     # ------------------------------------------------------------------
@@ -274,6 +275,8 @@ class DualReadoutEventDataset(Dataset):
                         totals = np.sum(sanitized, axis=1, dtype=np.float64)
 
                     keep_mask = np.logical_and(finite_rows, totals <= threshold)
+                    if(len(keep_mask)!= np.sum(keep_mask)):
+                        print("File",file_path,"Events",start,"to",stop,"removed",np.sum(~keep_mask),"out of",len(keep_mask))
                     for offset, keep in enumerate(keep_mask):
                         if keep:
                             file_indices.append((file_id, start + offset))

@@ -275,7 +275,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     misc_group.add_argument(
-        "--test_outputs",
+        "--output",
         type=Path,
         default=None,
         help=(
@@ -295,6 +295,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.metrics_json = base_dir / "metrics.json"
         if args.config_json is None:
             args.config_json = base_dir / "config.json"
+        if args.output_json is None:
+            args.output_json = base_dir / "output.json"
 
     return args
 
@@ -744,7 +746,7 @@ def main() -> None:
         print(json.dumps(metrics, indent=2))
         maybe_save_metrics(metrics, args.metrics_json)
         if test_outputs is not None:
-            _write_test_outputs(test_outputs, args.test_outputs)
+            _write_test_outputs(test_outputs, args.output_json)
         return
 
     if args.checkpoint is not None:
@@ -773,7 +775,7 @@ def main() -> None:
     print(json.dumps(metrics, indent=2))
     maybe_save_metrics(metrics, args.metrics_json)
     if test_outputs is not None:
-        _write_test_outputs(test_outputs, args.test_outputs)
+        _write_test_outputs(test_outputs, args.output_json)
 
 
 if __name__ == "__main__":
