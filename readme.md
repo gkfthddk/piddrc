@@ -25,52 +25,98 @@ All models produce three outputs:
 
 ## Quick Start
 
-1. **Install dependencies** using the provided requirements file:
+### 1. Install dependencies
 
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Create a dataset** by pointing the loader to your HDF5 files:
+Install the core Python dependencies into your environment using the
+provided requirements file:
 
-   ```python
-   from torch.utils.data import DataLoader
-   from pid.data import DualReadoutEventDataset, collate_events
+```bash
+pip install -r requirements.txt
+```
 
-   dataset = DualReadoutEventDataset(
-       files=["/path/to/electrons.h5", "/path/to/pions.h5"],
-       hit_features=("x", "y", "z", "S", "C", "t"),
-       label_key="particle_type",
-       energy_key="true_energy",
-       max_points=2048,
-   )
+### 2. Prepare input datasets
 
-   loader = DataLoader(dataset, batch_size=32, collate_fn=collate_events, shuffle=True)
+The toolkit expects HDF5 files where each entry represents a calorimeter
+event.  You can use the helper script `toh5.py` to convert raw ROOT files
+into the expected format:
 
-   # Pass progress=False to silence dataset initialization logs, or use
-   # ``python run.py --no_dataset_progress`` when working with the CLI.
-   ```
+```bash
+python toh5.py --input path/to/tree.root --output electrons.h5
+```
 
-3. **Instantiate a model** and trainer:
+Repeat this conversion for every particle type that you would like to
+include in the training sample.  When working with large data volumes it
+is often convenient to shard the converted output into multiple files so
+that they can be streamed efficiently from disk.
 
-   ```python
-   import torch
-   from pid.engine import Trainer, TrainingConfig
-   from pid.models.pointset_mlp import PointSetMLP
+### 3. Create a dataset object
 
-   sample = dataset[0]
-   model = PointSetMLP(
-       in_channels=len(dataset.hit_features),
-       summary_dim=sample.summary.numel(),
-       num_classes=len(dataset.classes),
-   )
+```python
+from torch.utils.data import DataLoader
+from pid.data import DualReadoutEventDataset, collate_events
 
-   optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-   trainer = Trainer(model, optimizer, device=torch.device("cuda"))
-   trainer.fit(loader)
-   ```
+dataset = DualReadoutEventDataset(
+    files=["/path/to/electrons.h5", "/path/to/pions.h5"],
+    hit_features=("x", "y", "z", "S", "C", "t"),
+    label_key="particle_type",
+    energy_key="true_energy",
+    max_points=2048,
+)
 
-4. **Evaluate** using `trainer.evaluate(test_loader)` to obtain a summary
-   of PID and energy metrics.
+loader = DataLoader(dataset, batch_size=32, collate_fn=collate_events, shuffle=True)
+```
+
+### 4. Instantiate a model and trainer
+
+```python
+import torch
+from pid.engine import Trainer, TrainingConfig
+from pid.models.pointset_mlp import PointSetMLP
+
+sample = dataset[0]
+model = PointSetMLP(
+    in_channels=len(dataset.hit_features),
+    summary_dim=sample.summary.numel(),
+    num_classes=len(dataset.classes),
+)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+trainer = Trainer(model, optimizer, device=torch.device("cuda"))
+trainer.fit(loader)
+```
+
+### 5. Train and evaluate from the command line
+
+For longer training runs you can use the high level CLI.  The entry point
+`run.py` mirrors the steps above while adding logging, checkpointing and
+TensorBoard integration:
+
+```bash
+python run.py \
+  --train electron.h5 pion.h5 \
+  --val val_electron.h5 val_pion.h5 \
+  --model pointset_mlp \
+  --epochs 100 \
+  --batch_size 64 \
+  --lr 3e-4
+```
+
+Checkpoints are written to the directory specified via `--output_dir` and
+can later be restored with the `--resume` flag.  After training finishes
+you can run the evaluation loop only by appending `--eval_only`.
+
+### 6. Evaluate in Python
+
+Use `trainer.evaluate(test_loader)` to obtain a summary of PID and energy
+metrics in interactive notebooks or scripts.
+
+### 7. Reproduce paper results
+
+To replicate the configurations used in the accompanying paper or note,
+inspect the experiment YAML files under `pid/config/experiments/`.  Each
+file specifies the model family, optimizer schedule and data sources used
+in our benchmarks.  The provided `submit.py` script reads these configs
+and orchestrates multi-job sweeps across different random seeds.
 
 ### Inspecting model architectures
 
@@ -96,6 +142,18 @@ pytest
 
 This exercises the data loader, models and trainer to guard against
 regressions.
+
+## Project structure
+
+```
+.
+├── compute_channel_stats.py   # Utility for aggregating per-channel hit statistics
+├── pid/                       # Core library code: data, models and engine modules
+├── run.py                     # Training/evaluation CLI entry point
+├── submit.py                  # Experiment launcher for sweeps across configs and seeds
+├── tests/                     # Pytest-based regression suite
+└── toh5.py                    # ROOT → HDF5 converter used during data preparation
+```
 
 ## License
 
