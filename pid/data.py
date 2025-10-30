@@ -141,8 +141,7 @@ class DualReadoutEventDataset(Dataset):
         max_points: Optional[int] = None,
         is_cherenkov_key: str = "DRcalo3dHits.type",
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
-        depth_key: Optional[str] = "z",
-        time_key: Optional[str] = "t",
+        pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
         amp_sum_clip_sample_size: int = 16_384,
@@ -166,9 +165,8 @@ class DualReadoutEventDataset(Dataset):
         self.max_points = max_points
         self.is_cherenkov_key = is_cherenkov_key
         self.amp_sum_key = amp_sum_key
-        self.depth_key = depth_key
-        self.time_key = time_key
-        self.summary_fn = summary_fn or self._default_summary
+        self.pos_keys = pos_keys
+        self.summary_fn = summary_fn or self._amp_summary
         self.cache_file_handles = cache_file_handles
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
@@ -402,7 +400,18 @@ class DualReadoutEventDataset(Dataset):
     # ------------------------------------------------------------------
     # Summary feature engineering
     # ------------------------------------------------------------------
-    def _default_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+    def _amp_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+        """Compute simple amplitude-based summary features for one event."""
+
+        is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
+        c = points[is_cherenkov, index_map[self.amp_sum_key]]
+        s = points[~is_cherenkov, index_map[self.amp_sum_key]]
+        c_sum = float(np.sum(c))
+        s_sum = float(np.sum(s))
+        stats= [s_sum, c_sum, s_sum + c_sum]
+        return np.asarray(stats, dtype=np.float32)
+    
+    def _dist_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""
 
         is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
@@ -416,41 +425,29 @@ class DualReadoutEventDataset(Dataset):
 
         stats: List[float] = [s_sum, c_sum, total_sum, ratio, s_minus_c]
 
-        if self.depth_key and self.depth_key in index_map:
-            z_c = points[is_cherenkov, index_map[self.depth_key]]
-            if c_sum > 0:
-                depth_mean_c = float(np.average(z_c, weights=c))
-                depth_std_c = float(np.sqrt(np.average((z_c - depth_mean_c) ** 2, weights=c)))
+        for key in self.pos_keys:
+            if key and key in index_map:
+                coord_c = points[is_cherenkov, index_map[key]]
+                if c_sum > 0:
+                    mean_c = float(np.average(coord_c, weights=c))
+                    std_c = float(np.sqrt(np.average((coord_c - mean_c) ** 2, weights=c)))
+                    peak_c = float(coord_c[np.argmax(c)])
+                else:
+                    mean_c = float(np.mean(coord_c))
+                    std_c = float(np.std(coord_c))
+                    peak_c = mean_c
+                coord_s = points[~is_cherenkov, index_map[key]]
+                if s_sum > 0:
+                    mean_s = float(np.average(coord_s, weights=s))
+                    std_s = float(np.sqrt(np.average((coord_s - mean_s) ** 2, weights=s)))
+                    peak_s = float(coord_s[np.argmax(s)])
+                else:
+                    mean_s = float(np.mean(coord_s))
+                    std_s = float(np.std(coord_s))
+                    peak_s = mean_s
+                stats.extend([mean_c, std_c, peak_c, mean_s, std_s, peak_s])
             else:
-                depth_mean_c = float(np.mean(z_c))
-                depth_std_c = float(np.std(z_c))
-            stats.extend([depth_mean_c, depth_std_c])
-            z_s = points[~is_cherenkov, index_map[self.depth_key]]
-            if s_sum > 0:
-                depth_mean_s = float(np.average(z_s, weights=s))
-                depth_std_s = float(np.sqrt(np.average((z_s - depth_mean_s) ** 2, weights=s)))
-            else:
-                depth_mean_s = float(np.mean(z_s))
-                depth_std_s = float(np.std(z_s))
-            stats.extend([depth_mean_s, depth_std_s])
-        else:
-            stats.extend([0.0, 0.0, 0.0, 0.0])
-
-        if self.time_key and self.time_key in index_map:
-            t_c = points[is_cherenkov, index_map[self.time_key]]
-            if c_sum > 0:
-                time_mean_c = float(np.average(t_c, weights=c))
-            else:
-                time_mean_c = float(np.mean(t_c))
-            stats.append(time_mean_c)
-            t_s = points[~is_cherenkov, index_map[self.time_key]]
-            if s_sum > 0:
-                time_mean_s = float(np.average(t_s, weights=s))
-            else:
-                time_mean_s = float(np.mean(t_s))
-            stats.append(time_mean_s)
-        else:
-            stats.extend([0.0, 0.0])
+                stats.extend([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         return np.asarray(stats, dtype=np.float32)
 
