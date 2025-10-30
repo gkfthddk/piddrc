@@ -22,7 +22,7 @@ from compute_stats import (
 
 def test_parse_args_populates_defaults():
     args = _parse_args([])
-    assert args.data_dir == DEFAULT_DATA_DIR
+    assert args.data_dir == DEFAULT_DIR
     assert args.files == list(DEFAULT_FILES)
     assert args.dataset_names == DEFAULT_DATASETS
     assert args.sample_size == DEFAULT_SAMPLE_SIZE
@@ -61,7 +61,7 @@ def test_scan_files_computes_statistics(tmp_path):
 
     result = scan_files(
         data_dir=str(data_dir),
-        files_names=[file_name],
+        file_names=[file_name],
         key="C_amp",
         sample_size=32,
         percentiles=(0.25, 0.5, 0.75),

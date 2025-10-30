@@ -108,9 +108,9 @@ _POOL_CHANNEL_TEMPLATES = (
 
 def _build_write_keys() -> List[str]:
     """Generates the list of all dataset keys to be written."""
-    keys = list(self._BASE_CHANNELS) # Start with a copy of base channels
+    keys = list(_BASE_CHANNELS)  # Start with a copy of base channels
     for pool in [4, 7, 8, 14, 28, 56]:
-        for template in self._POOL_CHANNEL_TEMPLATES:
+        for template in _POOL_CHANNEL_TEMPLATES:
             keys.append(template.format(pool=pool))
     return keys
 
@@ -133,7 +133,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--files",
         nargs="+",
-        default=DEFAULT_FILES,
+        default=list(DEFAULT_FILES),
         help=(
             "Dataset names (without .h5py extension) to include in the scan. "
             "Each name will be resolved against --data-dir."
@@ -163,7 +163,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--percentiles",
         type=float,
         nargs="*",
-        default=DEFAULT_PERCENTILES,
+        default=list(DEFAULT_PERCENTILES),
         help="Percentiles to report (values between 0 and 1).",
     )
     parser.add_argument(
@@ -182,7 +182,7 @@ def compute_stats(values: np.ndarray, percentiles: Sequence[float]) -> Dict[str,
         return {
             "count": 0, "min": math.nan, "max": math.nan,
             "mean": math.nan, "std": math.nan,
-            "percentiles": {p: math.nan for p in self.percentiles},
+            "percentiles": {p: math.nan for p in percentiles},
         }
 
     # Promote to float64 for numerical stability.
@@ -211,13 +211,13 @@ def compute_stats(values: np.ndarray, percentiles: Sequence[float]) -> Dict[str,
 
 def scan_files(
     data_dir: str,
-    files_names: Sequence[str],
+    file_names: Sequence[str],
     key: str,
     sample_size: int,
     percentiles: Sequence[float],
 ) -> Dict[str, Any]:
     dataset=[]
-    for name in files_names:
+    for name in file_names:
         path = os.path.join(data_dir, f"{name}.h5py")
         if not os.path.exists(path):
             warnings.warn(f"File not found: {path}. Skipping.")
@@ -273,7 +273,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.files:
         raise ValueError("No input files specified for scanning.")
     results={}
-    for key in tqdm.tqdm(args.dataset_names):
+    iterator = tqdm(args.dataset_names) if tqdm is not None else args.dataset_names
+    for key in iterator:
         results[key] = scan_files(
             data_dir=args.data_dir,
             file_names=args.files,
