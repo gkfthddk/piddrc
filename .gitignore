@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+toh5_legacy.py
 h5s
+h5
 save
 condor
