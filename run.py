@@ -101,6 +101,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Hit-level feature names to load from the HDF5 files",
     )
     io_group.add_argument(
+        "--pool",
+        type=int,
+        default=1,
+        help="Pooling factor for down-sampling hits (1 = no pooling)",
+    )
+    io_group.add_argument(
         "--label_key",
         type=str,
         default="GenParticles.PDG",
@@ -127,7 +133,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--test_fraction",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Fraction of the training data to reserve for testing when no test files are provided",
     )
     io_group.add_argument(
@@ -218,8 +224,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--lr_scheduler", type=str, default=None)
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
-    train_group.add_argument("--no_amp", action="store_true", help="Disable automatic mixed precision")
-    train_group.add_argument("--num_workers", type=int, default=4)
+    train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
+    train_group.add_argument("--num_workers", type=int, default=8)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -307,6 +313,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
+    if args.pool > 1:
+        args.hit_features = [feat.replace("DRcalo3dHits",f"DRcalo3dHits{args.pool}") for feat in args.hit_features]
 
     return args
 
@@ -641,6 +649,7 @@ def configure_trainer(
         log_every=log_every,
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
+        early_stopping_patience=4,
     )
 
     scheduler = None
@@ -744,7 +753,7 @@ def main() -> None:
         epochs=args.epochs,
         log_every=args.log_every,
         max_grad_norm=args.max_grad_norm,
-        use_amp=not args.no_amp,
+        use_amp= args.use_amp,
         lr_scheduler_name=args.lr_scheduler,
     )
 
