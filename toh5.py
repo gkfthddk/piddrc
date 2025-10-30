@@ -43,7 +43,7 @@ class StreamingStats:
         self.max_val: float = -math.inf
         self._sample: List[float] = []
 
-    def update(self, values: np.ndarray) -> None:
+    def compute(self, values: np.ndarray) -> Dict[str, Any]:
         if values.size == 0:
             return
 
@@ -56,31 +56,7 @@ class StreamingStats:
         self.min_val = min(self.min_val, float(np.min(flat)))
         self.max_val = max(self.max_val, float(np.max(flat)))
 
-        if self.sample_size <= 0:
-            return
-
-        # Fill the reservoir until it reaches the desired size.
-        if len(self._sample) < self.sample_size:
-            needed = self.sample_size - len(self._sample)
-            take = min(needed, flat.size)
-            self._sample.extend(map(float, flat[:take]))
-            flat = flat[take:]
-            total_seen = start_count + take
-        else:
-            total_seen = start_count
-
-        if flat.size == 0:
-            return
-
-        # Reservoir sampling for the remaining values.
-        for value in flat:
-            total_seen += 1
-            j = np.random.randint(0, total_seen)
-            if j < self.sample_size:
-                self._sample[j] = float(value)
-
-    def finalize(self) -> Dict[str, Any]:
-        if self.count == 0:
+        if self.sample_size <= 0 or flat.size == 0:
             return {
                 "count": 0, "min": math.nan, "max": math.nan,
                 "mean": math.nan, "std": math.nan,
@@ -92,11 +68,7 @@ class StreamingStats:
         std = math.sqrt(variance)
 
         percentile_values: Dict[float, float]
-        if self.sample_size > 0 and self._sample:
-            sample_array = np.asarray(self._sample, dtype=np.float64)
-            percentile_values = {p: float(np.quantile(sample_array, p, method="linear")) for p in self.percentiles}
-        else:
-            percentile_values = {p: math.nan for p in self.percentiles}
+        percentile_values = {p: float(np.quantile(flat, p, method="linear")) for p in self.percentiles}
 
         return {"count": int(self.count), "min": float(self.min_val), "max": float(self.max_val), "mean": float(mean), "std": float(std), "percentiles": percentile_values}
 
@@ -146,7 +118,7 @@ class H5FileProcessor:
         output_dir: Path,
         max_entries_per_dataset: int = 3_000_000,
         compute_stats: bool = False,
-        stats_sample_size: int = 200_000,
+        stats_sample_size: int = 20_000,
         stats_percentiles: Sequence[float] = DEFAULT_STATS_PERCENTILES,
     ):
         self.reco_path = reco_path
@@ -160,7 +132,7 @@ class H5FileProcessor:
     def _build_write_keys(self) -> List[str]:
         """Generates the list of all dataset keys to be written."""
         keys = list(self._BASE_CHANNELS) # Start with a copy of base channels
-        for pool in [4, 8, 14, 28, 56]:
+        for pool in [4, 7, 8, 14, 28, 56]:
             for template in self._POOL_CHANNEL_TEMPLATES:
                 keys.append(template.format(pool=pool))
         return keys
@@ -213,13 +185,13 @@ class H5FileProcessor:
         for file_name in file_list:
             indices = H5FileProcessor._validated_indices(file_name)
             if not indices:
-                logger.info(f"No valid entries found or error in {file_name}. Skipping.")
+                logger.info(f"No valid entries found or error in {file_name}.")
                 queue.put((file_name, None)) # Indicate no valid data for this file
                 continue
             
             file_name, data_dict = H5FileProcessor._read_datasets(file_name, dataset_names, indices)
             queue.put((file_name, data_dict))
-        logger.info(f"Reader worker finished for {len(file_list)} files.")
+        #logger.info(f"Reader worker finished for {len(file_list)} files.")
 
     def _writer_worker(self, queue: multiprocessing.Queue, output_file: Path, total_files_to_process: int, stats_dict_proxy: Dict):
         """Worker process to write data from the queue to the output HDF5 file."""
@@ -243,13 +215,11 @@ class H5FileProcessor:
                     pbar.update(1)
 
                     if data_dict is None:
-                        logger.warning(f"Skipping writing for {file_name} due to previous read error or no valid data.")
+                        logger.warning(f"Skipping {file_name}")
+                        os.remove(file_name)
                         continue
 
                     for dataset_name, data_chunk in data_dict.items():
-                        # Update stats before writing
-                        if self.compute_stats and dataset_name in stats_calculators:
-                            stats_calculators[dataset_name].update(data_chunk)
 
                         if dataset_name in f_out:
                             dataset = f_out[dataset_name]
@@ -273,9 +243,12 @@ class H5FileProcessor:
                     gc.collect() # Explicit garbage collection
 
         if self.compute_stats:
-            logger.info("Finalizing and collecting statistics...")
-            for key, calculator in stats_calculators.items():
-                stats_dict_proxy[key] = calculator.finalize()
+            with h5py.File(output_file, 'r') as f_out:
+                sample_size=self.stats_kwargs["sample_size"]
+                # Update stats before writing
+                for dataset_name in tqdm.tqdm(list(f_out.keys()),desc="Computing stats"):
+                    if dataset_name in stats_calculators:
+                         stats_dict_proxy[dataset_name]=stats_calculators[dataset_name].compute(f_out[dataset_name][:sample_size])
 
         logger.info(f"Writer worker finished for {output_file}")
         print_memory_usage('Writer end')
@@ -359,7 +332,7 @@ class H5FileProcessor:
         # Setup multiprocessing for reading and writing
         print_memory_usage('Start merge')
         manager = multiprocessing.Manager()
-        data_queue = manager.Queue(maxsize=40) # Queue for data chunks
+        data_queue = manager.Queue(maxsize=20) # Queue for data chunks
         stats_dict_proxy = manager.dict() if self.compute_stats else None
 
         # Start reader processes
@@ -404,7 +377,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Merge HDF5 files and optionally compute statistics.")
     parser.add_argument("--reco_base", type=str, default="/users/yulee/dream/tools/reco", help="Set reco_base_path.")
-    parser.add_argument("--ouput_dir", type=str, default="h5s", help="Set output_h5_dir.")
+    parser.add_argument("--output_dir", type=str, default="h5s", help="Set output_h5_dir.")
     parser.add_argument("--compute_stats", action="store_true", help="Enable computation of channel statistics.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
     args = parser.parse_args()
@@ -422,11 +395,11 @@ def main():
     for pid in pids:
         # for en in ["10","20","50","100"]:
         for en in ["1-100"]:
-            for pool_size in [10]: # Renamed 'pool' to 'pool_size' to avoid confusion with multiprocessing pool
-                if pool_size == 1:
+            for timing_size in [1]: # Renamed 'pool' to 'pool_size' to avoid confusion with multiprocessing pool
+                if timing_size == 1:
                     sample_name = f"{pid}_{en}GeV"
                 else:
-                    sample_name = f"{pid}_{en}GeV_{pool_size}"
+                    sample_name = f"{pid}_{en}GeV_{timing_size}"
                 processor.process_sample(sample_name, max_num_files=5000, num_reader_processes=8, overwrite=args.overwrite)
 
                 gc.collect()
