@@ -14,7 +14,6 @@ from tqdm.auto import tqdm
 from .models.base import ModelOutputs
 from . import metrics as metrics_mod
 
-
 @dataclass
 class TrainingConfig:
     epochs: int = 20
@@ -27,6 +26,7 @@ class TrainingConfig:
     early_stopping_patience: Optional[int] = None
     early_stopping_min_delta: float = 0.0
     early_stopping_monitor: str = "loss"
+    show_progress: bool = True
 
 
 class Trainer:
@@ -113,7 +113,14 @@ class Trainer:
     ) -> Union[Dict[str, float], Tuple[Dict[str, float], List[Dict[str, Any]]]]:
         mode = "train" if training else "eval"
         self.model.train(mode == "train")
-        iterator = tqdm(data_loader, desc=f"{mode} epoch {epoch}" if epoch else mode, leave=(mode == "train"))
+        if self.config.show_progress:
+            iterator = tqdm(
+                data_loader,
+                desc=f"{mode} epoch {epoch}" if epoch else mode,
+                leave=(mode == "train"),
+            )
+        else:
+            iterator = data_loader
         losses: List[float] = []
         cls_losses: List[float] = []
         reg_losses: List[float] = []
@@ -197,7 +204,8 @@ class Trainer:
                     auc = None
                 if auc is not None:
                     postfix["auc"] = auc
-                iterator.set_postfix(postfix)
+                if self.config.show_progress:
+                    iterator.set_postfix(postfix)
 
         metrics = self._compute_metrics(
             logits_list,

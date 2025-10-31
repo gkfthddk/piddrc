@@ -278,6 +278,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Print a torchinfo overview of the model before training",
     )
     misc_group.add_argument(
+        "--no_progress_bar",
+        dest="progress_bar",
+        action="store_false",
+        help="Disable tqdm progress bars during training and evaluation",
+    )
+    misc_group.add_argument(
         "--name",
         type=str,
         default="test",
@@ -295,7 +301,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
-    parser.set_defaults(dataset_progress=True)
+    parser.set_defaults(dataset_progress=True, progress_bar=True)
 
     args = parser.parse_args(argv)
 
@@ -641,6 +647,7 @@ def configure_trainer(
     log_every: int,
     max_grad_norm: float | None,
     use_amp: bool,
+    show_progress: bool,
     lr_scheduler_name: str | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -649,6 +656,7 @@ def configure_trainer(
         log_every=log_every,
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
+        show_progress=show_progress,
         early_stopping_patience=4,
     )
 
@@ -753,7 +761,8 @@ def main() -> None:
         epochs=args.epochs,
         log_every=args.log_every,
         max_grad_norm=args.max_grad_norm,
-        use_amp= args.use_amp,
+        use_amp=args.use_amp,
+        show_progress=args.progress_bar,
         lr_scheduler_name=args.lr_scheduler,
     )
 
