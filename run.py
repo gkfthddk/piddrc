@@ -226,7 +226,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group = parser.add_argument_group("Optimisation")
     train_group.add_argument("--batch_size", type=int, default=64)
     train_group.add_argument("--epochs", type=int, default=100)
-    train_group.add_argument("--learning_rate", type=float, default=3e-4)
+    train_group.add_argument("--learning_rate", type=float, default=0.001)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
     train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
@@ -690,7 +690,7 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
         show_progress=show_progress,
-        early_stopping_patience=5,
+        early_stopping_patience=6,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
     )

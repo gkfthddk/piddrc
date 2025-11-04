@@ -283,7 +283,7 @@ class Trainer:
     def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         labels = batch["labels"]
         energy = batch["energy"]
-        loss_cls = nn.functional.cross_entropy(outputs.logits, labels)
+        loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=0.1)
         if outputs.log_sigma is not None:
             log_sigma = outputs.log_sigma.clamp(min=-5.0, max=5.0)
             residual = energy - outputs.energy
