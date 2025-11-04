@@ -57,12 +57,13 @@ def dummy_h5(tmp_path):
 
 
 @pytest.fixture
-def pipeline_dataset(dummy_h5):
+def pipeline_dataset(dummy_h5, stats_file):
     return DualReadoutEventDataset(
         [str(dummy_h5)],
         hit_features=HIT_FEATURES,
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        stat_file=str(stats_file),
         max_points=16,
     )
 
@@ -190,7 +191,7 @@ def test_trainer_evaluate_outputs(pipeline_dataset):
     assert "logits" in first_record
 
 
-def test_build_datasets_auto_split(dummy_h5):
+def test_build_datasets_auto_split(dummy_h5, stats_file):
     args = argparse.Namespace(
         train_files=[dummy_h5],
         val_files=None,
@@ -198,6 +199,7 @@ def test_build_datasets_auto_split(dummy_h5):
         hit_features=HIT_FEATURES,
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        stat_file=str(stats_file),
         max_points=16,
         val_fraction=0.25,
         test_fraction=0.25,

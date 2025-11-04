@@ -427,9 +427,6 @@ def build_datasets(
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
-    if not hasattr(args, "stat_file"):
-        args.stat_file = None
-
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,

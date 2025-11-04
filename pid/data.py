@@ -8,6 +8,8 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
+import json
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -71,6 +73,9 @@ class DualReadoutEventDataset(Dataset):
         Dataset name containing the per-event classification labels.
     energy_key:
         Dataset name containing the regression target (true energy).
+    stat_file:
+        Path to a YAML file containing per-feature statistics used for
+        normalization and amplitude threshold estimation.
     max_points:
         If not ``None``, each event is randomly down-sampled to this
         number of points using a deterministic RNG seeded by the event
@@ -143,7 +148,7 @@ class DualReadoutEventDataset(Dataset):
         hit_features: Sequence[str],
         label_key: str,
         energy_key: str,
-        stat_file: Optional[str] = None,
+        stat_file: str,
         max_points: Optional[int] = None,
         is_cherenkov_key: str = "DRcalo3dHits.type",
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
@@ -161,38 +166,38 @@ class DualReadoutEventDataset(Dataset):
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
         self.files: Tuple[str, ...] = tuple(files)
-        self.stat_file = stat_file
+        self.stat_file = os.fspath(stat_file)
         self.hit_features: Tuple[str, ...] = tuple(hit_features)
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
         self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
         self.feature_stat: Dict[str, Mapping[str, float]] = {}
         self.feature_max: Dict[str, float] = {}
-        channel_stat: Mapping[str, Any] | None = None
-        if stat_file is not None:
-            if yaml is None:
-                raise ModuleNotFoundError(
-                    "PyYAML is required to load stat_file. Install PyYAML or omit the stat_file argument."
-                )
-            with open(stat_file, "r", encoding="utf-8") as yf:
-                loaded = yaml.safe_load(yf) or {}
-            if not isinstance(loaded, Mapping):
-                raise TypeError("stat_file must contain a mapping from feature name to statistics")
-            channel_stat = loaded
-            for name in self.hit_features:
-                stats = channel_stat.get(name, {}) if isinstance(channel_stat, Mapping) else {}
-                if not isinstance(stats, Mapping):
-                    stats = {}
-                self.feature_stat[name] = stats
-                max_val = float(stats.get("max", 0.0)) if "max" in stats else 0.0
-                min_val = float(stats.get("min", 0.0)) if "min" in stats else 0.0
-                scale = max(abs(max_val), abs(min_val))
-                if not np.isfinite(scale) or scale <= 0:
-                    scale = 1.0
-                self.feature_max[name] = scale
+        if yaml is None:
+            with open(self.stat_file, "r", encoding="utf-8") as yf:
+                try:
+                    loaded = json.load(yf)
+                except json.JSONDecodeError as exc:
+                    raise ModuleNotFoundError(
+                        "PyYAML is required to load stat_file. Install PyYAML to read YAML content."
+                    ) from exc
         else:
-            self.feature_stat = {}
-            self.feature_max = {name: 1.0 for name in self.hit_features}
+            with open(self.stat_file, "r", encoding="utf-8") as yf:
+                loaded = yaml.safe_load(yf) or {}
+        if not isinstance(loaded, Mapping):
+            raise TypeError("stat_file must contain a mapping from feature name to statistics")
+        channel_stat: Mapping[str, Any] | None = loaded
+        for name in self.hit_features:
+            stats = channel_stat.get(name, {}) if isinstance(channel_stat, Mapping) else {}
+            if not isinstance(stats, Mapping):
+                stats = {}
+            self.feature_stat[name] = stats
+            max_val = float(stats.get("max", 0.0)) if "max" in stats else 0.0
+            min_val = float(stats.get("min", 0.0)) if "min" in stats else 0.0
+            scale = max(abs(max_val), abs(min_val))
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
+            self.feature_max[name] = scale
         self._channel_stat = channel_stat
 
         self.label_key = label_key

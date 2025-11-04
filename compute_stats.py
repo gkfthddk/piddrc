@@ -235,11 +235,10 @@ def scan_files(
         with h5py.File(path, "r") as handle:
             if key in handle:
                 source = handle[key]
-                selection = [slice(None)] * source.ndim
-                selection[0] = slice(0, sample_size)
                 if max_points is not None and source.ndim > 1:
-                    selection[1] = slice(0, max_points)
-                data = source[tuple(selection)]
+                    data = source[:sample_size, :max_points]
+                else:
+                    data = source[:sample_size]
                 dataset.append(np.asarray(data))
     if not dataset:
         empty = np.empty((0,), dtype=np.float32)
