@@ -15,6 +15,7 @@ from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Opti
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import yaml
 
 try:
     import h5py
@@ -138,9 +139,10 @@ class DualReadoutEventDataset(Dataset):
         hit_features: Sequence[str],
         label_key: str,
         energy_key: str,
+        stat_file: str,
         max_points: Optional[int] = None,
         is_cherenkov_key: str = "DRcalo3dHits.type",
-        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
+        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
         pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
@@ -155,10 +157,16 @@ class DualReadoutEventDataset(Dataset):
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
         self.files: Tuple[str, ...] = tuple(files)
+        self.stat_file = stat_file
         self.hit_features: Tuple[str, ...] = tuple(hit_features)
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
         self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
+        with open(stat_file) as yf:
+            channel_stat=yaml.safe_load(yf)
+        self.feature_stat={name:channel_stat[name] for name in self.hit_features}
+        self.feature_max={name:max(channel_stat[name]['max'],-channel_stat[name]['min']) for name in self.hit_features}
+        print("feature_max",self.feature_max)
 
         self.label_key = label_key
         self.energy_key = energy_key
@@ -195,7 +203,8 @@ class DualReadoutEventDataset(Dataset):
         self._log(f"Discovered {len(self.classes)} class(es)")
 
         self._log("Estimating amplitude-sum threshold")
-        self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        #self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        self._amp_sum_threshold = channel_stat['S_amp']['max']*1.5
         if np.isfinite(self._amp_sum_threshold):
             self._log(f"  Using threshold {self._amp_sum_threshold:,.3f}")
         else:
@@ -216,7 +225,7 @@ class DualReadoutEventDataset(Dataset):
             return self._load_event(handle, file_id, event_id)
 
     def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
-        hits = [np.asarray(handle[feature][event_id], dtype=np.float32) for feature in self.hit_features]
+        hits = [np.asarray(handle[feature][event_id]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
         if self.max_points is not None and points.shape[0] > self.max_points:
             #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)

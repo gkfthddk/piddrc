@@ -160,6 +160,14 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max_points",
+        type=int,
+        default=500,
+        help=(
+            "Maximum number of points to sample from each event."
+        ),
+    )
+    parser.add_argument(
         "--percentiles",
         type=float,
         nargs="*",
@@ -214,6 +222,7 @@ def scan_files(
     file_names: Sequence[str],
     key: str,
     sample_size: int,
+    max_points: int,
     percentiles: Sequence[float],
 ) -> Dict[str, Any]:
     dataset=[]
@@ -225,8 +234,11 @@ def scan_files(
         
         with h5py.File(path, "r") as handle:
             if key in handle:
-                dataset.extend(handle[key][:sample_size])
-    return compute_stats(np.array(dataset), percentiles)
+                if(len(handle[key].shape)>1):
+                    dataset.append(handle[key][:sample_size,:max_points])
+                else:
+                    dataset.append(handle[key][:sample_size])
+    return compute_stats(np.concatenate(dataset), percentiles)
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:
     if output is None:
@@ -280,6 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file_names=args.files,
             key=key,
             sample_size=args.sample_size,
+            max_points=args.max_points,
             percentiles=args.percentiles,
         )
 
