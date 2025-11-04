@@ -149,7 +149,10 @@ class Trainer:
             loss_reg: Optional[torch.Tensor] = None
             check+=1
             if check==3 and self.config.profile and training:
-                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                activities = [ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    activities.append(ProfilerActivity.CUDA)
+                with profile(activities=activities, record_shapes=True) as prof:
                     with record_function("model_inference"):
                         outputs = self.model(batch)
                 print('profile results:')
