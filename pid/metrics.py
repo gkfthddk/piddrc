@@ -18,6 +18,8 @@ def accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return float((preds == labels).float().mean().item())
 
+def mse(pred: torch.Tensor, target: torch.Tensor) -> float:
+    return float(torch.mean((pred - target) ** 2).item())
 
 def roc_auc(logits: torch.Tensor, labels: torch.Tensor) -> Optional[float]:
     if roc_auc_score is None:
@@ -55,4 +57,4 @@ def energy_linearity(pred: torch.Tensor, target: torch.Tensor) -> Tuple[float, f
     return float(slope), float(intercept)
 
 
-__all__ = ["accuracy", "roc_auc", "energy_resolution", "energy_linearity"]
+__all__ = ["accuracy", "mse", "roc_auc", "energy_resolution", "energy_linearity"]

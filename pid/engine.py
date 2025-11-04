@@ -204,7 +204,7 @@ class Trainer:
             if step % self.config.log_every == 0:
                 postfix = {
                     "loss": sum(losses) / len(losses),
-                    "reg": sum(reg_losses) / len(reg_losses),
+                    "mse": metrics_mod.mse(torch.cat(energy_pred), torch.cat(energy_true)),
                 }
                 if sigma_values:
                     postfix["sigma"] = sum(sigma_values) / len(sigma_values)
