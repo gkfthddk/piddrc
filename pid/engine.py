@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.profiler import profile, record_function, ProfilerActivity
 from tqdm.auto import tqdm
 
 from .models.base import ModelOutputs
@@ -27,6 +28,8 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.0
     early_stopping_monitor: str = "loss"
     show_progress: bool = True
+    profile: bool = False
+    profile_dir: str = "profile"
 
 
 class Trainer:
@@ -135,7 +138,7 @@ class Trainer:
         autocast_enabled = self.scaler.is_enabled()
 
         skipped_entries = 0
-
+        check=0
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
             grad_context = nullcontext() if training else torch.no_grad()
@@ -144,7 +147,14 @@ class Trainer:
             loss: Optional[torch.Tensor] = None
             loss_cls: Optional[torch.Tensor] = None
             loss_reg: Optional[torch.Tensor] = None
-
+            check+=1
+            if check==3 and self.config.profile and training:
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                    with record_function("model_inference"):
+                        outputs = self.model(batch)
+                print('profile results:')
+                print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+                
             with grad_context:
                 with torch.amp.autocast('cuda',enabled=autocast_enabled):
                     outputs = self.model(batch)

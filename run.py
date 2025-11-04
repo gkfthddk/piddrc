@@ -129,7 +129,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--max_points",
         type=int,
         default=1000,
-        help="Randomly down-sample each event to this many hits",
+        help="Down-sample each event to this many hits",
     )
     io_group.add_argument(
         "--val_fraction",
@@ -184,7 +184,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     model_group.add_argument(
         "--depth",
         type=int,
-        default=4,
+        default=5,
         help="Number of layers/blocks in the backbone",
     )
     model_group.add_argument(
@@ -307,6 +307,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Optional path to save per-event model outputs when evaluating the test set. "
             "When omitted, 'test_outputs.json' is used."
         ),
+    )
+    misc_group.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile() for model acceleration (PyTorch 2.0+)",
     )
     misc_group.add_argument(
         "--profile",
@@ -775,9 +780,12 @@ def main() -> None:
     model.to(device)
     
     # Add torch.compile for a potential speed-up on PyTorch 2.0+
-    if hasattr(torch, "compile"):
-        print("Compiling model with torch.compile()...")
-        model = torch.compile(model, mode="reduce-overhead")
+    if hasattr(torch, "compile") and args.compile:
+        compile_mode = "reduce-overhead"
+        if args.profile:
+            compile_mode = "default"
+        print(f"Compiling model with torch.compile(mode='{compile_mode}')...")
+        model = torch.compile(model, mode=compile_mode)
 
     train_loader, val_loader, test_loader = build_dataloaders(
         train_dataset,
