@@ -222,10 +222,10 @@ def scan_files(
     file_names: Sequence[str],
     key: str,
     sample_size: int,
-    max_points: int,
     percentiles: Sequence[float],
+    max_points: Optional[int] = None,
 ) -> Dict[str, Any]:
-    dataset=[]
+    dataset: List[np.ndarray] = []
     for name in file_names:
         path = os.path.join(data_dir, f"{name}.h5py")
         if not os.path.exists(path):
@@ -234,11 +234,14 @@ def scan_files(
         
         with h5py.File(path, "r") as handle:
             if key in handle:
-                if(len(handle[key].shape)>1):
-                    dataset.append(handle[key][:sample_size,:max_points])
-                else:
-                    dataset.append(handle[key][:sample_size])
-    return compute_stats(np.concatenate(dataset), percentiles)
+                data = handle[key][:sample_size]
+                if len(data.shape) > 1 and max_points is not None:
+                    data = data[:, :max_points]
+                dataset.append(data)
+    if not dataset:
+        empty = np.empty((0,), dtype=np.float32)
+        return compute_stats(empty, percentiles)
+    return compute_stats(np.concatenate(dataset, axis=0), percentiles)
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:
     if output is None:

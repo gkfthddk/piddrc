@@ -10,12 +10,16 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import yaml
+
+try:  # pragma: no cover - optional dependency
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    yaml = None
 
 try:
     import h5py
@@ -139,7 +143,7 @@ class DualReadoutEventDataset(Dataset):
         hit_features: Sequence[str],
         label_key: str,
         energy_key: str,
-        stat_file: str,
+        stat_file: Optional[str] = None,
         max_points: Optional[int] = None,
         is_cherenkov_key: str = "DRcalo3dHits.type",
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
@@ -162,11 +166,34 @@ class DualReadoutEventDataset(Dataset):
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
         self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
-        with open(stat_file) as yf:
-            channel_stat=yaml.safe_load(yf)
-        self.feature_stat={name:channel_stat[name] for name in self.hit_features}
-        self.feature_max={name:max(channel_stat[name]['max'],-channel_stat[name]['min']) for name in self.hit_features}
-        print("feature_max",self.feature_max)
+        self.feature_stat: Dict[str, Mapping[str, float]] = {}
+        self.feature_max: Dict[str, float] = {}
+        channel_stat: Mapping[str, Any] | None = None
+        if stat_file is not None:
+            if yaml is None:
+                raise ModuleNotFoundError(
+                    "PyYAML is required to load stat_file. Install PyYAML or omit the stat_file argument."
+                )
+            with open(stat_file, "r", encoding="utf-8") as yf:
+                loaded = yaml.safe_load(yf) or {}
+            if not isinstance(loaded, Mapping):
+                raise TypeError("stat_file must contain a mapping from feature name to statistics")
+            channel_stat = loaded
+            for name in self.hit_features:
+                stats = channel_stat.get(name, {}) if isinstance(channel_stat, Mapping) else {}
+                if not isinstance(stats, Mapping):
+                    stats = {}
+                self.feature_stat[name] = stats
+                max_val = float(stats.get("max", 0.0)) if "max" in stats else 0.0
+                min_val = float(stats.get("min", 0.0)) if "min" in stats else 0.0
+                scale = max(abs(max_val), abs(min_val))
+                if not np.isfinite(scale) or scale <= 0:
+                    scale = 1.0
+                self.feature_max[name] = scale
+        else:
+            self.feature_stat = {}
+            self.feature_max = {name: 1.0 for name in self.hit_features}
+        self._channel_stat = channel_stat
 
         self.label_key = label_key
         self.energy_key = energy_key
@@ -204,7 +231,17 @@ class DualReadoutEventDataset(Dataset):
 
         self._log("Estimating amplitude-sum threshold")
         #self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
-        self._amp_sum_threshold = channel_stat['S_amp']['max']*1.5
+        stats = None
+        if isinstance(self._channel_stat, Mapping):
+            stats = self._channel_stat.get("S_amp")
+        if isinstance(stats, Mapping):
+            max_value = stats.get("max")
+            if isinstance(max_value, (int, float)) and np.isfinite(max_value):
+                self._amp_sum_threshold = float(max_value) * 1.5
+            else:
+                self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        else:
+            self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
         if np.isfinite(self._amp_sum_threshold):
             self._log(f"  Using threshold {self._amp_sum_threshold:,.3f}")
         else:
