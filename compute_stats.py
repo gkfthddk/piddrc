@@ -105,11 +105,11 @@ _POOL_CHANNEL_TEMPLATES = (
     "DRcalo2dHits{pool}.position.z",
     "DRcalo2dHits{pool}.type",
 )
-
+POOLSET=[4,5,6,7,8,9,10,11,12,13,14,28,56]
 def _build_write_keys() -> List[str]:
     """Generates the list of all dataset keys to be written."""
     keys = list(_BASE_CHANNELS)  # Start with a copy of base channels
-    for pool in [4, 7, 8, 14, 28, 56]:
+    for pool in POOLSET:
         for template in _POOL_CHANNEL_TEMPLATES:
             keys.append(template.format(pool=pool))
     return keys

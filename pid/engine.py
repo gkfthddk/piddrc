@@ -22,6 +22,7 @@ class TrainingConfig:
     classification_weight: float = 1.0
     regression_weight: float = 1.0
     max_grad_norm: Optional[float] = None
+    label_smoothing = 0.0
     use_amp: bool = True
     warmup_steps: int = 0
     early_stopping_patience: Optional[int] = None
@@ -283,7 +284,7 @@ class Trainer:
     def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         labels = batch["labels"]
         energy = batch["energy"]
-        loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=0.1)
+        loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=self.config.label_smoothing)
         if outputs.log_sigma is not None:
             log_sigma = outputs.log_sigma.clamp(min=-5.0, max=5.0)
             residual = energy - outputs.energy

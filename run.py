@@ -226,13 +226,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group = parser.add_argument_group("Optimisation")
     train_group.add_argument("--batch_size", type=int, default=64)
     train_group.add_argument("--epochs", type=int, default=100)
-    train_group.add_argument("--learning_rate", type=float, default=0.001)
+    train_group.add_argument("--learning_rate", type=float, default=3e-4)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
+    train_group.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.0,
+        help="Label smoothing factor for cross-entropy loss (e.g., 0.1)",
+    )
     train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
-    train_group.add_argument("--num_workers", type=int, default=10)
+    train_group.add_argument("--num_workers", type=int, default=8)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -673,6 +679,7 @@ def configure_trainer(
     *,
     device: torch.device,
     learning_rate: float,
+    label_smoothing: float,
     weight_decay: float,
     epochs: int,
     log_every: int,
@@ -690,7 +697,8 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
         show_progress=show_progress,
-        early_stopping_patience=6,
+        label_smoothing=label_smoothing,
+        early_stopping_patience=5,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
     )
@@ -806,6 +814,7 @@ def main() -> None:
         model,
         device=device,
         learning_rate=args.learning_rate,
+        label_smoothing=args.label_smoothing,
         weight_decay=args.weight_decay,
         epochs=args.epochs,
         log_every=args.log_every,
