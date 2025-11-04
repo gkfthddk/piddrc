@@ -22,7 +22,7 @@ try:  # pragma: no cover - optional dependency
     import yaml
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     yaml = None
-
+from tqdm.auto import tqdm
 try:
     import h5py
 except ModuleNotFoundError as exc:  # pragma: no cover - helpful message during unit tests
@@ -150,8 +150,9 @@ class DualReadoutEventDataset(Dataset):
         energy_key: str,
         stat_file: str,
         max_points: Optional[int] = None,
+        pool: int = 1,
         is_cherenkov_key: str = "DRcalo3dHits.type",
-        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
+        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
         pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
@@ -203,6 +204,11 @@ class DualReadoutEventDataset(Dataset):
         self.label_key = label_key
         self.energy_key = energy_key
         self.max_points = max_points
+        if(pool > 1):
+            is_cherenkov_key=is_cherenkov_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
+            amp_sum_key=amp_sum_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
+            pos_keys=[key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}") for key in pos_keys]
+
         self.is_cherenkov_key = is_cherenkov_key
         self.amp_sum_key = amp_sum_key
         self.pos_keys = pos_keys
@@ -299,7 +305,10 @@ class DualReadoutEventDataset(Dataset):
         for file_path in self.files:
             self._log(f"  Reading labels from {file_path}")
             with h5py.File(file_path, "r") as handle:
-                data = handle[self.label_key][:]
+                if(self._max_events is None):
+                    data = handle[self.label_key][:]
+                else:
+                    data = handle[self.label_key][:self._max_events]
                 decoded = [_decode_label(value) for value in data]
                 labels.extend(decoded)
         unique_labels = sorted(set(labels))
@@ -331,7 +340,23 @@ class DualReadoutEventDataset(Dataset):
 
                 chunk_size = min(max(num_events // 32, 1), 1024)
                 file_indices: List[Tuple[int, int]] = []
-                for start in range(0, num_events, chunk_size):
+
+                # If max_events is set, we can limit the number of chunks to scan
+                scan_num_events = num_events
+                if self._max_events is not None:
+                    # Estimate the number of events to scan. Add a buffer.
+                    scan_num_events = min(num_events, int(self._max_events * 1.2))
+
+                chunk_iterator = range(0, scan_num_events, chunk_size)
+                if self._progress_enabled:
+                    chunk_iterator = tqdm(
+                        chunk_iterator,
+                        desc="    Scanning chunks",
+                        unit="chunk",
+                        leave=False,
+                        total=len(chunk_iterator),
+                    )
+                for start in chunk_iterator:
                     stop = min(start + chunk_size, num_events)
                     amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
                     finite = np.isfinite(amp_chunk)
@@ -346,14 +371,12 @@ class DualReadoutEventDataset(Dataset):
 
                     keep_mask = np.logical_and(finite_rows, totals <= threshold)
                     if len(keep_mask) != int(np.sum(keep_mask)):
-                        removed = int(np.sum(~keep_mask))
-                        self._log(
-                            "    Removed "
-                            f"{removed} event(s) while scanning entries {start:,}-{stop - 1:,}"
-                        )
+                        pass
                     for offset, keep in enumerate(keep_mask):
                         if keep:
                             file_indices.append((file_id, start + offset))
+                    if self._max_events is not None and len(file_indices) >= self._max_events:
+                        break
 
                 per_file_indices.append(file_indices)
 

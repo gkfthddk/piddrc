@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -128,12 +129,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--max_points",
         type=int,
         default=1000,
-        help="Randomly down-sample each event to this many hits",
+        help="Down-sample each event to this many hits",
     )
     io_group.add_argument(
         "--val_fraction",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Fraction of the training data to reserve for validation when no validation files are provided",
     )
     io_group.add_argument(
@@ -183,7 +184,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     model_group.add_argument(
         "--depth",
         type=int,
-        default=4,
+        default=5,
         help="Number of layers/blocks in the backbone",
     )
     model_group.add_argument(
@@ -227,11 +228,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--epochs", type=int, default=100)
     train_group.add_argument("--learning_rate", type=float, default=3e-4)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
-    train_group.add_argument("--lr_scheduler", type=str, default=None)
+    train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
-    train_group.add_argument("--num_workers", type=int, default=8)
+    train_group.add_argument("--num_workers", type=int, default=10)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -307,6 +308,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
+    misc_group.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile() for model acceleration (PyTorch 2.0+)",
+    )
+    misc_group.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable the PyTorch profiler for a few steps to analyze performance.",
+    )
+    misc_group.add_argument(
+        "--profile_dir",
+        type=Path,
+        default=None,
+        help="Directory to save profiler traces. Defaults to 'save/<name>/profile'.",
+    )
     parser.set_defaults(dataset_progress=True, progress_bar=True)
 
     args = parser.parse_args(argv)
@@ -325,6 +342,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
+        if args.profile_dir is None:
+            args.profile_dir = base_dir / "profile"
     if args.pool > 1:
         args.hit_features = [feat.replace("DRcalo3dHits",f"DRcalo3dHits{args.pool}") for feat in args.hit_features]
 
@@ -434,6 +453,7 @@ def build_datasets(
         energy_key=args.energy_key,
         stat_file=args.stat_file,
         max_points=args.max_points,
+        pool=args.pool,
         balance_files=balance_train_files,
         max_events=train_limit,
         progress=progress,
@@ -450,6 +470,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
+            pool=args.pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -465,6 +486,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
+            pool=args.pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -658,6 +680,8 @@ def configure_trainer(
     use_amp: bool,
     show_progress: bool,
     lr_scheduler_name: str | None,
+    profile: bool,
+    profile_dir: Path | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     config = TrainingConfig(
@@ -666,12 +690,18 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
         show_progress=show_progress,
-        early_stopping_patience=4,
+        early_stopping_patience=5,
+        profile=profile,
+        profile_dir=str(profile_dir) if profile_dir else "profile",
     )
 
     scheduler = None
     if lr_scheduler_name == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    elif lr_scheduler_name == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    elif lr_scheduler_name == "exponential":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
     trainer = Trainer(
         model=model, optimizer=optimizer, scheduler=scheduler, device=device, config=config
@@ -736,6 +766,8 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 
 def main() -> None:
+    start_dt=datetime.datetime.now()
+    print(f"{os.path.basename(__file__)} started at {start_dt.isoformat(sep=' ', timespec='seconds')}")
     args = parse_args()
 
     maybe_save_config(args, args.config_json)
@@ -746,6 +778,14 @@ def main() -> None:
     print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
     model = build_model(args, base_dataset)
     model.to(device)
+    
+    # Add torch.compile for a potential speed-up on PyTorch 2.0+
+    if hasattr(torch, "compile") and args.compile:
+        compile_mode = "reduce-overhead"
+        if args.profile:
+            compile_mode = "default"
+        print(f"Compiling model with torch.compile(mode='{compile_mode}')...")
+        model = torch.compile(model, mode=compile_mode)
 
     train_loader, val_loader, test_loader = build_dataloaders(
         train_dataset,
@@ -773,6 +813,8 @@ def main() -> None:
         use_amp=args.use_amp,
         show_progress=args.progress_bar,
         lr_scheduler_name=args.lr_scheduler,
+        profile=args.profile,
+        profile_dir=args.profile_dir,
     )
 
     if args.checkpoint is not None and args.eval_only:
@@ -827,7 +869,9 @@ def main() -> None:
     maybe_save_metrics(metrics, args.metrics_json)
     if test_outputs is not None:
         _write_test_outputs(test_outputs, args.output_json)
-
+    end_dt=datetime.datetime.now()
+    print(f"{os.path.basename(__file__)} ended at {end_dt.isoformat(sep=' ', timespec='seconds')}")
+    print(f"Total running time: {end_dt - start_dt}")
 
 if __name__ == "__main__":
     main()
