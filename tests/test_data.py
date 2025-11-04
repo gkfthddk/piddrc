@@ -43,7 +43,7 @@ def overflow_h5(tmp_path):
     return file_path
 
 
-def test_amplitude_sum_masking(overflow_h5):
+def test_amplitude_sum_masking(overflow_h5, stats_file):
     dataset = DualReadoutEventDataset(
         [str(overflow_h5)],
         hit_features=(
@@ -57,6 +57,7 @@ def test_amplitude_sum_masking(overflow_h5):
         ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        stat_file=str(stats_file),
         max_points=None,
         amp_sum_clip_percentile=0.75,
         amp_sum_clip_multiplier=1.0,
@@ -79,7 +80,7 @@ def test_amplitude_sum_masking(overflow_h5):
     assert sorted(seen_event_ids) == [0, 1, 2]
 
 
-def test_cache_file_handles_disabled_does_not_leak(overflow_h5):
+def test_cache_file_handles_disabled_does_not_leak(overflow_h5, stats_file):
     dataset = DualReadoutEventDataset(
         [str(overflow_h5)],
         hit_features=(
@@ -93,6 +94,7 @@ def test_cache_file_handles_disabled_does_not_leak(overflow_h5):
         ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        stat_file=str(stats_file),
         max_points=None,
         amp_sum_clip_percentile=None,
         cache_file_handles=False,
@@ -130,7 +132,7 @@ def _write_simple_file(path, num_events, label_value):
         handle.create_dataset("E_gen", data=energies)
 
 
-def test_balance_and_limit(tmp_path):
+def test_balance_and_limit(tmp_path, stats_file):
     file_a = tmp_path / "a.h5"
     file_b = tmp_path / "b.h5"
     _write_simple_file(file_a, 5, b"11")
@@ -148,6 +150,7 @@ def test_balance_and_limit(tmp_path):
         ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        stat_file=str(stats_file),
         max_points=None,
         amp_sum_clip_percentile=None,
     )

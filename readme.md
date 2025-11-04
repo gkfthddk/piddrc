@@ -60,6 +60,7 @@ dataset = DualReadoutEventDataset(
     hit_features=("x", "y", "z", "S", "C", "t"),
     label_key="particle_type",
     energy_key="true_energy",
+    stat_file="/path/to/stats.yaml",
     max_points=2048,
 )
 

@@ -35,7 +35,7 @@ submit_desc={
     'output':f'condor/{jobname}.out',
     'error':f'condor/{jobname}.error',
     'log':f'condor/{jobname}.log',
-    'arguments':" ".join(sys.argv[1:])+" --condor",
+    'arguments':" ".join(sys.argv[1:])+" --no_progress_bar",
     #'priority':1,
 }
 submit_desc = {key: str(value) for key, value in submit_desc.items()}

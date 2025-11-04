@@ -160,6 +160,14 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max_points",
+        type=int,
+        default=500,
+        help=(
+            "Maximum number of points to sample from each event."
+        ),
+    )
+    parser.add_argument(
         "--percentiles",
         type=float,
         nargs="*",
@@ -215,18 +223,27 @@ def scan_files(
     key: str,
     sample_size: int,
     percentiles: Sequence[float],
+    max_points: Optional[int] = None,
 ) -> Dict[str, Any]:
-    dataset=[]
+    dataset: List[np.ndarray] = []
     for name in file_names:
         path = os.path.join(data_dir, f"{name}.h5py")
         if not os.path.exists(path):
             warnings.warn(f"File not found: {path}. Skipping.")
             continue
-        
+
         with h5py.File(path, "r") as handle:
             if key in handle:
-                dataset.extend(handle[key][:sample_size])
-    return compute_stats(np.array(dataset), percentiles)
+                source = handle[key]
+                if max_points is not None and source.ndim > 1:
+                    data = source[:sample_size, :max_points]
+                else:
+                    data = source[:sample_size]
+                dataset.append(np.asarray(data))
+    if not dataset:
+        empty = np.empty((0,), dtype=np.float32)
+        return compute_stats(empty, percentiles)
+    return compute_stats(np.concatenate(dataset, axis=0), percentiles)
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:
     if output is None:
@@ -280,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file_names=args.files,
             key=key,
             sample_size=args.sample_size,
+            max_points=args.max_points,
             percentiles=args.percentiles,
         )
 

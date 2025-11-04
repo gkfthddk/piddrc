@@ -8,13 +8,20 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
+import json
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+try:  # pragma: no cover - optional dependency
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    yaml = None
 
 try:
     import h5py
@@ -66,6 +73,9 @@ class DualReadoutEventDataset(Dataset):
         Dataset name containing the per-event classification labels.
     energy_key:
         Dataset name containing the regression target (true energy).
+    stat_file:
+        Path to a YAML file containing per-feature statistics used for
+        normalization and amplitude threshold estimation.
     max_points:
         If not ``None``, each event is randomly down-sampled to this
         number of points using a deterministic RNG seeded by the event
@@ -138,9 +148,10 @@ class DualReadoutEventDataset(Dataset):
         hit_features: Sequence[str],
         label_key: str,
         energy_key: str,
+        stat_file: str,
         max_points: Optional[int] = None,
         is_cherenkov_key: str = "DRcalo3dHits.type",
-        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
+        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
         pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
@@ -155,10 +166,39 @@ class DualReadoutEventDataset(Dataset):
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
         self.files: Tuple[str, ...] = tuple(files)
+        self.stat_file = os.fspath(stat_file)
         self.hit_features: Tuple[str, ...] = tuple(hit_features)
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
         self.feature_to_index: Dict[str, int] = {name: i for i, name in enumerate(self.hit_features)}
+        self.feature_stat: Dict[str, Mapping[str, float]] = {}
+        self.feature_max: Dict[str, float] = {}
+        if yaml is None:
+            with open(self.stat_file, "r", encoding="utf-8") as yf:
+                try:
+                    loaded = json.load(yf)
+                except json.JSONDecodeError as exc:
+                    raise ModuleNotFoundError(
+                        "PyYAML is required to load stat_file. Install PyYAML to read YAML content."
+                    ) from exc
+        else:
+            with open(self.stat_file, "r", encoding="utf-8") as yf:
+                loaded = yaml.safe_load(yf) or {}
+        if not isinstance(loaded, Mapping):
+            raise TypeError("stat_file must contain a mapping from feature name to statistics")
+        channel_stat: Mapping[str, Any] | None = loaded
+        for name in self.hit_features:
+            stats = channel_stat.get(name, {}) if isinstance(channel_stat, Mapping) else {}
+            if not isinstance(stats, Mapping):
+                stats = {}
+            self.feature_stat[name] = stats
+            max_val = float(stats.get("max", 0.0)) if "max" in stats else 0.0
+            min_val = float(stats.get("min", 0.0)) if "min" in stats else 0.0
+            scale = max(abs(max_val), abs(min_val))
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
+            self.feature_max[name] = scale
+        self._channel_stat = channel_stat
 
         self.label_key = label_key
         self.energy_key = energy_key
@@ -195,7 +235,18 @@ class DualReadoutEventDataset(Dataset):
         self._log(f"Discovered {len(self.classes)} class(es)")
 
         self._log("Estimating amplitude-sum threshold")
-        self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        #self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        stats = None
+        if isinstance(self._channel_stat, Mapping):
+            stats = self._channel_stat.get("S_amp")
+        if isinstance(stats, Mapping):
+            max_value = stats.get("max")
+            if isinstance(max_value, (int, float)) and np.isfinite(max_value):
+                self._amp_sum_threshold = float(max_value) * 1.5
+            else:
+                self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+        else:
+            self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
         if np.isfinite(self._amp_sum_threshold):
             self._log(f"  Using threshold {self._amp_sum_threshold:,.3f}")
         else:
@@ -216,7 +267,7 @@ class DualReadoutEventDataset(Dataset):
             return self._load_event(handle, file_id, event_id)
 
     def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
-        hits = [np.asarray(handle[feature][event_id], dtype=np.float32) for feature in self.hit_features]
+        hits = [np.asarray(handle[feature][event_id]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
         if self.max_points is not None and points.shape[0] > self.max_points:
             #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)

@@ -86,6 +86,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional test HDF5 files",
     )
     io_group.add_argument(
+        "--stat_file",
+        type=Path,
+        default="h5s/stats_1-100GeV.yaml",
+        help="input channel statistics yaml files",
+    )
+    io_group.add_argument(
         "--hit_features",
         type=str,
         nargs="+",
@@ -426,6 +432,7 @@ def build_datasets(
         hit_features=args.hit_features,
         label_key=args.label_key,
         energy_key=args.energy_key,
+        stat_file=args.stat_file,
         max_points=args.max_points,
         balance_files=balance_train_files,
         max_events=train_limit,
@@ -441,6 +448,7 @@ def build_datasets(
             hit_features=args.hit_features,
             label_key=args.label_key,
             energy_key=args.energy_key,
+            stat_file=args.stat_file,
             max_points=args.max_points,
             class_names=base_dataset.classes,
             progress=progress,
@@ -455,6 +463,7 @@ def build_datasets(
             hit_features=args.hit_features,
             label_key=args.label_key,
             energy_key=args.energy_key,
+            stat_file=args.stat_file,
             max_points=args.max_points,
             class_names=base_dataset.classes,
             progress=progress,
