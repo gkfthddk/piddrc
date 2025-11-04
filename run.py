@@ -133,7 +133,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--val_fraction",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Fraction of the training data to reserve for validation when no validation files are provided",
     )
     io_group.add_argument(
@@ -227,7 +227,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--epochs", type=int, default=100)
     train_group.add_argument("--learning_rate", type=float, default=3e-4)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
-    train_group.add_argument("--lr_scheduler", type=str, default=None)
+    train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
@@ -434,6 +434,7 @@ def build_datasets(
         energy_key=args.energy_key,
         stat_file=args.stat_file,
         max_points=args.max_points,
+        pool=args.pool,
         balance_files=balance_train_files,
         max_events=train_limit,
         progress=progress,
@@ -450,6 +451,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
+            pool=args.pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -465,6 +467,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
+            pool=args.pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -666,12 +669,16 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         use_amp=use_amp,
         show_progress=show_progress,
-        early_stopping_patience=4,
+        early_stopping_patience=5,
     )
 
     scheduler = None
     if lr_scheduler_name == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    elif lr_scheduler_name == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    elif lr_scheduler_name == "exponential":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
 
     trainer = Trainer(
         model=model, optimizer=optimizer, scheduler=scheduler, device=device, config=config

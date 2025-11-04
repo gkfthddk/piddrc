@@ -117,7 +117,7 @@ class Trainer:
             iterator = tqdm(
                 data_loader,
                 desc=f"{mode} epoch {epoch}" if epoch else mode,
-                leave=(mode == "train"),
+                leave=True,
             )
         else:
             iterator = data_loader

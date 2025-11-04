@@ -150,8 +150,9 @@ class DualReadoutEventDataset(Dataset):
         energy_key: str,
         stat_file: str,
         max_points: Optional[int] = None,
+        pool: int = 1,
         is_cherenkov_key: str = "DRcalo3dHits.type",
-        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",#TODO apply pooling
+        amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
         pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
@@ -203,6 +204,11 @@ class DualReadoutEventDataset(Dataset):
         self.label_key = label_key
         self.energy_key = energy_key
         self.max_points = max_points
+        if(pool > 1):
+            is_cherenkov_key=is_cherenkov_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
+            amp_sum_key=amp_sum_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
+            pos_keys=[key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}") for key in pos_keys]
+
         self.is_cherenkov_key = is_cherenkov_key
         self.amp_sum_key = amp_sum_key
         self.pos_keys = pos_keys
