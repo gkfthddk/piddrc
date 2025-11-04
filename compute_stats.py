@@ -231,13 +231,16 @@ def scan_files(
         if not os.path.exists(path):
             warnings.warn(f"File not found: {path}. Skipping.")
             continue
-        
+
         with h5py.File(path, "r") as handle:
             if key in handle:
-                data = handle[key][:sample_size]
-                if len(data.shape) > 1 and max_points is not None:
-                    data = data[:, :max_points]
-                dataset.append(data)
+                source = handle[key]
+                selection = [slice(None)] * source.ndim
+                selection[0] = slice(0, sample_size)
+                if max_points is not None and source.ndim > 1:
+                    selection[1] = slice(0, max_points)
+                data = source[tuple(selection)]
+                dataset.append(np.asarray(data))
     if not dataset:
         empty = np.empty((0,), dtype=np.float32)
         return compute_stats(empty, percentiles)
