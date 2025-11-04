@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -231,7 +232,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
-    train_group.add_argument("--num_workers", type=int, default=8)
+    train_group.add_argument("--num_workers", type=int, default=10)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -307,6 +308,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "When omitted, 'test_outputs.json' is used."
         ),
     )
+    misc_group.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable the PyTorch profiler for a few steps to analyze performance.",
+    )
+    misc_group.add_argument(
+        "--profile_dir",
+        type=Path,
+        default=None,
+        help="Directory to save profiler traces. Defaults to 'save/<name>/profile'.",
+    )
     parser.set_defaults(dataset_progress=True, progress_bar=True)
 
     args = parser.parse_args(argv)
@@ -325,6 +337,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
+        if args.profile_dir is None:
+            args.profile_dir = base_dir / "profile"
     if args.pool > 1:
         args.hit_features = [feat.replace("DRcalo3dHits",f"DRcalo3dHits{args.pool}") for feat in args.hit_features]
 
@@ -661,6 +675,8 @@ def configure_trainer(
     use_amp: bool,
     show_progress: bool,
     lr_scheduler_name: str | None,
+    profile: bool,
+    profile_dir: Path | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     config = TrainingConfig(
@@ -670,6 +686,8 @@ def configure_trainer(
         use_amp=use_amp,
         show_progress=show_progress,
         early_stopping_patience=5,
+        profile=profile,
+        profile_dir=str(profile_dir) if profile_dir else "profile",
     )
 
     scheduler = None
@@ -743,6 +761,8 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 
 def main() -> None:
+    start_dt=datetime.datetime.now()
+    print(f"{os.path.basename(__file__)} started at {start_dt.isoformat(sep=' ', timespec='seconds')}")
     args = parse_args()
 
     maybe_save_config(args, args.config_json)
@@ -753,6 +773,11 @@ def main() -> None:
     print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
     model = build_model(args, base_dataset)
     model.to(device)
+    
+    # Add torch.compile for a potential speed-up on PyTorch 2.0+
+    if hasattr(torch, "compile"):
+        print("Compiling model with torch.compile()...")
+        model = torch.compile(model, mode="reduce-overhead")
 
     train_loader, val_loader, test_loader = build_dataloaders(
         train_dataset,
@@ -780,6 +805,8 @@ def main() -> None:
         use_amp=args.use_amp,
         show_progress=args.progress_bar,
         lr_scheduler_name=args.lr_scheduler,
+        profile=args.profile,
+        profile_dir=args.profile_dir,
     )
 
     if args.checkpoint is not None and args.eval_only:
@@ -834,7 +861,9 @@ def main() -> None:
     maybe_save_metrics(metrics, args.metrics_json)
     if test_outputs is not None:
         _write_test_outputs(test_outputs, args.output_json)
-
+    end_dt=datetime.datetime.now()
+    print(f"{os.path.basename(__file__)} ended at {end_dt.isoformat(sep=' ', timespec='seconds')}")
+    print(f"Total running time: {end_dt - start_dt}")
 
 if __name__ == "__main__":
     main()
