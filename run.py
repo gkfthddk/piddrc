@@ -32,6 +32,7 @@ MODEL_REGISTRY = {
     "mlp": PointSetMLP,
     "transformer": PointSetTransformer,
     "mamba": PointSetMamba,
+    "mamba2": PointSetMamba,
 }
 
 
@@ -586,8 +587,14 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             mlp_ratio=args.mlp_ratio,
             **common_kwargs,
         )
-    elif model_name == "mamba":
-        model = model_cls(hidden_dim=args.hidden_dim, depth=args.depth, **common_kwargs)
+    elif model_name in {"mamba", "mamba2"}:
+        backend = "mamba2" if model_name == "mamba2" else "mamba"
+        model = model_cls(
+            hidden_dim=args.hidden_dim,
+            depth=args.depth,
+            backend=backend,
+            **common_kwargs,
+        )
     else:  # pragma: no cover - choices enforced by argparse
         raise ValueError(f"Unknown model type: {args.model}")
 
