@@ -263,10 +263,25 @@ class PointSetTransformerV3(nn.Module):
             use_uncertainty=use_uncertainty,
         )
 
+    @staticmethod
+    def _get_pos_from_batch(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        for key in ("pos", "xyz", "position"):
+            if key in batch and batch[key] is not None:
+                return batch[key]
+        raise KeyError(
+            "PointSetTransformerV3 requires coordinates under 'pos', 'xyz' or 'position' in the batch."
+        )
+
     def forward(self, batch: dict[str, torch.Tensor]) -> ModelOutputs:
         points = batch["points"]
         mask = batch["mask"]
-        pos = points[..., 4:7]  # Extract (x, y, z) coordinates
+        pos = self._get_pos_from_batch(batch)
+        if pos.shape[-1] != 3:
+            raise ValueError(
+                f"Expected 3D coordinates for PTv3, but received shape {pos.shape}"
+            )
+        if pos.dtype != points.dtype or pos.device != points.device:
+            pos = pos.to(dtype=points.dtype, device=points.device)
 
         x = self.input_proj(points)
         for blk in self.blocks:

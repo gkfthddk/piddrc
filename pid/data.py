@@ -57,6 +57,7 @@ class EventRecord:
     label: int
     energy: torch.Tensor
     event_id: Tuple[int, int]
+    pos: torch.Tensor | None = None
 
 
 class DualReadoutEventDataset(Dataset):
@@ -309,10 +310,23 @@ class DualReadoutEventDataset(Dataset):
     def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
         hits = [np.asarray(handle[feature][event_id]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
+        pos_tensor: torch.Tensor | None = None
+        if self.pos_keys:
+            coord_indices: List[int] = []
+            for key in self.pos_keys:
+                if key in self.feature_to_index:
+                    coord_indices.append(self.feature_to_index[key])
+                if len(coord_indices) >= 3:
+                    break
+            if len(coord_indices) >= 3:
+                coords = np.asarray(points[:, coord_indices[:3]], dtype=np.float32).copy()
+                pos_tensor = torch.from_numpy(coords)
         if self.max_points is not None and points.shape[0] > self.max_points:
             #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
             #choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
             points = points[:self.max_points]
+            if pos_tensor is not None:
+                pos_tensor = pos_tensor[: self.max_points]
 
         # Some lightweight conversion helpers so tests using minimal HDF5 stubs do
         # not have to materialize the pre-computed amplitude summaries. When the
@@ -345,6 +359,7 @@ class DualReadoutEventDataset(Dataset):
             label=label,
             energy=torch.from_numpy(energy),
             event_id=(file_id, event_id),
+            pos=pos_tensor,
         )
 
     # ------------------------------------------------------------------
@@ -604,13 +619,24 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
     labels = torch.tensor([record.label for record in batch], dtype=torch.long)
     energy = torch.stack([record.energy for record in batch], dim=0).squeeze(-1)
     event_id = torch.tensor([record.event_id for record in batch], dtype=torch.long)
+    pos_template = next((record.pos for record in batch if record.pos is not None), None)
+    pos = None
+    if pos_template is not None:
+        pos = torch.zeros(
+            batch_size,
+            max_hits,
+            pos_template.shape[-1],
+            dtype=pos_template.dtype,
+        )
 
     for i, record in enumerate(batch):
         num_hits = record.points.shape[0]
         points[i, :num_hits] = record.points
         mask[i, :num_hits] = True
+        if pos is not None and record.pos is not None:
+            pos[i, :num_hits] = record.pos
 
-    return {
+    collated = {
         "points": points,
         "mask": mask,
         "summary": summary,
@@ -618,6 +644,9 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
         "energy": energy,
         "event_id": event_id,
     }
+    if pos is not None:
+        collated["pos"] = pos
+    return collated
 
 
 __all__ = ["DualReadoutEventDataset", "collate_events", "EventRecord"]
