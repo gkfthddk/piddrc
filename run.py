@@ -178,7 +178,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     model_group.add_argument(
         "--hidden_dim",
         type=int,
-        default=128,
+        default=64,
         help="Hidden dimension used by the backbone",
     )
     model_group.add_argument(
@@ -209,7 +209,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--head_hidden",
         type=int,
         nargs="+",
-        default=(256, 128),
+        default=(512, 256, 128),
         help="Hidden dimensions of the multi-task prediction head",
     )
     model_group.add_argument(
@@ -231,7 +231,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument(
         "--label_smoothing",
         type=float,
-        default=0.0,
+        default=0.1,
         help="Label smoothing factor for cross-entropy loss (e.g., 0.1)",
     )
     train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
@@ -666,7 +666,7 @@ def print_model_summary(
     model.eval()
     try:
         with torch.no_grad():
-            summary(model, input_data=(sample_batch,),col_names=("input_size", "output_size", "num_params"))
+            summary(model, input_data=(sample_batch,), depth=6, col_names=("input_size", "output_size", "num_params"))
     finally:
         for handle in hook_handles:
             handle.remove()
@@ -695,9 +695,9 @@ def configure_trainer(
         epochs=epochs,
         log_every=log_every,
         max_grad_norm=max_grad_norm,
+        label_smoothing=label_smoothing, 
         use_amp=use_amp,
         show_progress=show_progress,
-        label_smoothing=label_smoothing,
         early_stopping_patience=5,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",

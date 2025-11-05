@@ -280,7 +280,7 @@ class DualReadoutEventDataset(Dataset):
             #choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
             points = points[:self.max_points]
 
-        summary = self.summary_fn(points, self.feature_to_index)
+        summary = self.summary_fn(handle['C_amp'][event_id], handle['S_amp'][event_id], points, self.feature_to_index)
         label_value = handle[self.label_key][event_id]
         label_name = _decode_label(label_value)
         if label_name not in self.class_to_index:
@@ -474,25 +474,37 @@ class DualReadoutEventDataset(Dataset):
     # ------------------------------------------------------------------
     # Summary feature engineering
     # ------------------------------------------------------------------
-    def _amp_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+    def _amp_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute simple amplitude-based summary features for one event."""
 
         is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
-        c = points[is_cherenkov, index_map[self.amp_sum_key]]
-        s = points[~is_cherenkov, index_map[self.amp_sum_key]]
-        c_sum = float(np.sum(c))
-        s_sum = float(np.sum(s))
+        if(C_amp>0):
+            c_sum = float(C_amp)
+        else:
+            c = points[is_cherenkov, index_map[self.amp_sum_key]]
+            c_sum = float(np.sum(c))
+        if(S_amp>0):
+            s_sum = float(S_amp)
+        else:
+            s = points[~is_cherenkov, index_map[self.amp_sum_key]]
+            s_sum = float(np.sum(s))
         stats= [s_sum, c_sum, s_sum + c_sum]
         return np.asarray(stats, dtype=np.float32)
     
-    def _dist_summary(self, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+    def _dist_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""
 
         is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
         c = points[is_cherenkov, index_map[self.amp_sum_key]]
         s = points[~is_cherenkov, index_map[self.amp_sum_key]]
-        c_sum = float(np.sum(c))
-        s_sum = float(np.sum(s))
+        if(C_amp>0):
+            c_sum = float(C_amp)
+        else:
+            c_sum = float(np.sum(c))
+        if(S_amp>0):
+            s_sum = float(S_amp)
+        else:
+            s_sum = float(np.sum(s))
         total_sum = c_sum+s_sum
         ratio = float(c_sum / (s_sum + 1e-6))
         s_minus_c = float(s_sum - c_sum)

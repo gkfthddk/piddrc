@@ -22,7 +22,7 @@ class TrainingConfig:
     classification_weight: float = 1.0
     regression_weight: float = 1.0
     max_grad_norm: Optional[float] = None
-    label_smoothing = 0.0
+    label_smoothing: float = 0.0
     use_amp: bool = True
     warmup_steps: int = 0
     early_stopping_patience: Optional[int] = None
@@ -172,7 +172,7 @@ class Trainer:
                         if not torch.all(valid_mask):
                             outputs = self._mask_outputs(outputs, valid_mask)
                             effective_batch = self._mask_batch(batch, valid_mask)
-                        loss_cls, loss_reg = self._compute_losses(outputs, effective_batch)
+                        loss_cls, loss_reg = self._compute_losses(outputs, effective_batch, epoch)
                         loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
 
             if skip_step:
@@ -281,12 +281,14 @@ class Trainer:
         for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
             group["lr"] = base_lr * progress
 
-    def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor], epoch: int=None) -> tuple[torch.Tensor, torch.Tensor]:
         labels = batch["labels"]
         energy = batch["energy"]
         loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=self.config.label_smoothing)
         if outputs.log_sigma is not None:
             log_sigma = outputs.log_sigma.clamp(min=-5.0, max=5.0)
+            if(epoch is not None and epoch < 3):
+                log_sigma = torch.zeros_like(log_sigma).detach()
             residual = energy - outputs.energy
             loss_reg = 0.5 * torch.exp(-2.0 * log_sigma) * (residual ** 2) + log_sigma
             loss_reg = loss_reg.mean()
