@@ -8,11 +8,12 @@ point-cloud style neural networks.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -29,6 +30,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - helpful message during 
     raise ModuleNotFoundError("The h5py package is required to use the data utilities.") from exc
 
 SummaryFn = Callable[[np.ndarray, Mapping[str, int]], np.ndarray]
+AmpAwareSummaryFn = Callable[[float, float, np.ndarray, Mapping[str, int]], np.ndarray]
+SummaryFnType = Union[SummaryFn, AmpAwareSummaryFn]
 
 
 def _decode_label(value: np.ndarray) -> str:
@@ -113,13 +116,16 @@ class DualReadoutEventDataset(Dataset):
         threshold at the cost of additional I/O and memory. Set to a
         non-positive value to sample all events (not recommended for very
         large datasets).
-    summary_fn:
-        Custom callable that receives the point array of shape
+        summary_fn:
+        Custom callable that receives the Cherenkov and scintillation
+        amplitude summaries (as floats), the point array of shape
         ``(num_hits, num_features)`` and a mapping from feature name to
-        column index, and returns a 1-D numpy array of summary features.
-        By default a physics-motivated summary vector consisting of
-        ``[S_sum, C_sum, total, C_over_S, S_minus_C, depth_mean,
-        depth_std, time_mean]`` is produced.
+        column index, and returns a 1-D numpy array of summary
+        features. Legacy callables that only accept ``(points,
+        index_map)`` are still supported and the amplitude arguments are
+        ignored. By default a physics-motivated summary vector
+        consisting of ``[S_sum, C_sum, total, C_over_S, S_minus_C,
+        depth_mean, depth_std, time_mean]`` is produced.
     class_names:
         Optional sequence defining the label ordering. When ``None`` the
         dataset determines the unique labels by scanning the input files.
@@ -157,7 +163,7 @@ class DualReadoutEventDataset(Dataset):
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
         amp_sum_clip_sample_size: int = 16_384,
-        summary_fn: Optional[SummaryFn] = None,
+        summary_fn: Optional[SummaryFnType] = None,
         class_names: Optional[Sequence[str]] = None,
         cache_file_handles: bool = True,
         balance_files: bool = False,
@@ -212,7 +218,10 @@ class DualReadoutEventDataset(Dataset):
         self.is_cherenkov_key = is_cherenkov_key
         self.amp_sum_key = amp_sum_key
         self.pos_keys = pos_keys
-        self.summary_fn = summary_fn or self._amp_summary
+        if summary_fn is None:
+            self.summary_fn: AmpAwareSummaryFn = self._amp_summary
+        else:
+            self.summary_fn = self._coerce_summary_fn(summary_fn)
         self.cache_file_handles = cache_file_handles
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
@@ -260,6 +269,31 @@ class DualReadoutEventDataset(Dataset):
         self._log("Building event index")
         self._build_index()
         self._log(f"Index contains {len(self._indices):,} event(s)")
+
+    # ------------------------------------------------------------------
+    # Summary function helpers
+    # ------------------------------------------------------------------
+    def _coerce_summary_fn(self, summary_fn: SummaryFnType) -> AmpAwareSummaryFn:
+        """Wrap legacy summary functions to accept amplitude scalars."""
+
+        try:
+            parameter_count = len(inspect.signature(summary_fn).parameters)
+        except (TypeError, ValueError):
+            parameter_count = None
+
+        if parameter_count == 2:
+
+            def _wrapped(
+                c_amp: float,
+                s_amp: float,
+                points: np.ndarray,
+                index_map: Mapping[str, int],
+            ) -> np.ndarray:
+                return summary_fn(points, index_map)  # type: ignore[misc]
+
+            return _wrapped
+
+        return cast(AmpAwareSummaryFn, summary_fn)
 
     # ------------------------------------------------------------------
     # Dataset protocol implementation
