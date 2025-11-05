@@ -18,6 +18,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
         "Install them via 'pip install -r requirements.txt' and re-run pytest."
     ) from exc
 
+from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from pid.data import DualReadoutEventDataset, collate_events
@@ -114,6 +115,48 @@ def test_trainer_step(pipeline_dataset):
     metrics = history["train"][0]
     assert "loss" in metrics
     assert "accuracy" in metrics
+
+
+def test_build_model_infers_mamba_backend_from_model_choice(monkeypatch):
+    class RecordingMamba(nn.Module):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__()
+            self.backend = kwargs.get("backend")
+
+        def forward(self, *args, **kwargs):  # pragma: no cover - not used in test
+            raise NotImplementedError
+
+    monkeypatch.setattr(run, "PointSetMamba", RecordingMamba)
+    monkeypatch.setitem(run.MODEL_REGISTRY, "mamba", RecordingMamba)
+    monkeypatch.setitem(run.MODEL_REGISTRY, "mamba2", RecordingMamba)
+
+    class DummyRecord:
+        def __init__(self) -> None:
+            self.summary = torch.zeros(5)
+
+    class DummyDataset:
+        hit_features = ("f1", "f2", "f3")
+        classes = ("a", "b")
+
+        def __getitem__(self, index: int) -> DummyRecord:
+            return DummyRecord()
+
+    args = argparse.Namespace(
+        model="mamba2",
+        hidden_dim=32,
+        depth=2,
+        num_heads=4,
+        mlp_ratio=4.0,
+        head_hidden=(128, 64),
+        dropout=0.1,
+        disable_summary=False,
+        disable_uncertainty=False,
+    )
+
+    model = run.build_model(args, DummyDataset())
+
+    assert isinstance(model, RecordingMamba)
+    assert model.backend == "mamba2"
 
 
 def test_instance_name_sets_default_artifact_paths(dummy_h5, monkeypatch):

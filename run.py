@@ -32,6 +32,7 @@ MODEL_REGISTRY = {
     "mlp": PointSetMLP,
     "transformer": PointSetTransformer,
     "mamba": PointSetMamba,
+    "mamba2": PointSetMamba,
 }
 
 
@@ -452,6 +453,8 @@ def build_datasets(
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
+    pool = getattr(args, "pool", 1)
+
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
@@ -459,7 +462,7 @@ def build_datasets(
         energy_key=args.energy_key,
         stat_file=args.stat_file,
         max_points=args.max_points,
-        pool=args.pool,
+        pool=pool,
         balance_files=balance_train_files,
         max_events=train_limit,
         progress=progress,
@@ -476,7 +479,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
-            pool=args.pool,
+            pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -492,7 +495,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
-            pool=args.pool,
+            pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -586,8 +589,14 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             mlp_ratio=args.mlp_ratio,
             **common_kwargs,
         )
-    elif model_name == "mamba":
-        model = model_cls(hidden_dim=args.hidden_dim, depth=args.depth, **common_kwargs)
+    elif model_name in {"mamba", "mamba2"}:
+        backend = "mamba2" if model_name == "mamba2" else "mamba"
+        model = model_cls(
+            hidden_dim=args.hidden_dim,
+            depth=args.depth,
+            backend=backend,
+            **common_kwargs,
+        )
     else:  # pragma: no cover - choices enforced by argparse
         raise ValueError(f"Unknown model type: {args.model}")
 

@@ -188,3 +188,54 @@ def test_balance_and_limit(tmp_path, stats_file):
     for record in balanced_limited:
         balanced_counts[record.event_id[0]] += 1
     assert balanced_counts == {0: 2, 1: 2}
+
+
+def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
+    file_path = tmp_path / "no_amp_summaries.h5"
+    with h5py.File(file_path, "w") as handle:
+        amplitudes = np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32)
+        types = np.zeros_like(amplitudes)
+        types[:, 2:] = 1.0  # mark last two hits as Cherenkov
+        time = np.tile(np.linspace(0.0, 1.0, 4, dtype=np.float32), (1, 1))
+        zeros = np.zeros_like(amplitudes)
+
+        handle.create_dataset("DRcalo3dHits.amplitude_sum", data=amplitudes)
+        handle.create_dataset("DRcalo3dHits.type", data=types)
+        handle.create_dataset("DRcalo3dHits.time", data=time)
+        handle.create_dataset("DRcalo3dHits.time_end", data=time + 0.1)
+        handle.create_dataset("DRcalo3dHits.position.x", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
+
+        labels = np.array(["11"], dtype="S")
+        energies = np.array([10.0], dtype=np.float32)
+        handle.create_dataset("GenParticles.PDG", data=labels)
+        handle.create_dataset("E_gen", data=energies)
+
+    dataset = DualReadoutEventDataset(
+        [str(file_path)],
+        hit_features=(
+            "DRcalo3dHits.amplitude_sum",
+            "DRcalo3dHits.type",
+            "DRcalo3dHits.time",
+            "DRcalo3dHits.time_end",
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        stat_file=str(stats_file),
+        max_points=None,
+        amp_sum_clip_percentile=None,
+    )
+
+    record = dataset[0]
+    # Feature statistics scale the amplitude sums by 1/100.
+    s_sum = (1.0 + 2.0) / 100.0
+    c_sum = (3.0 + 4.0) / 100.0
+    total = s_sum + c_sum
+
+    assert np.isclose(record.summary[0].item(), s_sum)
+    assert np.isclose(record.summary[1].item(), c_sum)
+    assert np.isclose(record.summary[2].item(), total)
