@@ -29,6 +29,7 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.0
     early_stopping_monitor: str = "loss"
     show_progress: bool = True
+    freeze_sigma: int = 0
     profile: bool = False
     profile_dir: str = "profile"
 
@@ -287,7 +288,7 @@ class Trainer:
         loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=self.config.label_smoothing)
         if outputs.log_sigma is not None:
             log_sigma = outputs.log_sigma.clamp(min=-5.0, max=5.0)
-            if(epoch is not None and epoch < 3):
+            if(epoch is not None and epoch < self.config.freeze_sigma):
                 log_sigma = torch.zeros_like(log_sigma).detach()
             residual = energy - outputs.energy
             loss_reg = 0.5 * torch.exp(-2.0 * log_sigma) * (residual ** 2) + log_sigma

@@ -331,6 +331,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory to save profiler traces. Defaults to 'save/<name>/profile'.",
     )
+    misc_group.add_argument(
+        "--freeze_sigma",
+        type=int,
+        default=0,
+        help="Freeze the uncertainty head (log_sigma) to zero for the first N epochs.",
+    )
     parser.set_defaults(dataset_progress=True, progress_bar=True)
 
     args = parser.parse_args(argv)
