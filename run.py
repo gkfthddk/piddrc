@@ -26,12 +26,16 @@ from pid.data import EventRecord
 from pid.models.base import ModelOutputs, MultiTaskHead
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
+from pid.models.pointset_ptv3 import PointSetTransformerV3
+from pid.models.pointset_mlppp import PointSetMLPpp
 from pid.models.pointset_transformer import PointSetTransformer
 
 MODEL_REGISTRY = {
     "mlp": PointSetMLP,
     "transformer": PointSetTransformer,
     "mamba": PointSetMamba,
+    "ptv3": PointSetTransformerV3,
+    "mlppp": PointSetMLPpp,
     "mamba2": PointSetMamba,
 }
 
@@ -195,10 +199,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Number of attention heads (Transformer only)",
     )
     model_group.add_argument(
-        "--mlp_ratio",
+        "--mlp_expansion",
         type=float,
         default=4.0,
-        help="Feed-forward expansion ratio (Transformer only)",
+        help="Feed-forward expansion ratio (Transformer and MLP++ only)",
+    )
+    model_group.add_argument(
+        "--k_neighbors",
+        type=int,
+        default=16,
+        help="Number of neighbors for local attention (PTv3 only)",
     )
     model_group.add_argument(
         "--dropout",
@@ -592,7 +602,7 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             hidden_dim=args.hidden_dim,
             depth=args.depth,
             num_heads=args.num_heads,
-            mlp_ratio=args.mlp_ratio,
+            mlp_ratio=args.mlp_expansion,
             **common_kwargs,
         )
     elif model_name in {"mamba", "mamba2"}:
@@ -603,6 +613,20 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             backend=backend,
             **common_kwargs,
         )
+    elif model_name == "ptv3":
+        model = model_cls(
+            hidden_dim=args.hidden_dim,
+            depth=args.depth,
+            k_neighbors=args.k_neighbors,
+            **common_kwargs,
+        )
+    elif model_name == "mlppp":
+        model = model_cls(
+            embed_dim=args.hidden_dim,
+            depth=args.depth,
+            expansion=args.mlp_expansion,
+            **common_kwargs,
+            )
     else:  # pragma: no cover - choices enforced by argparse
         raise ValueError(f"Unknown model type: {args.model}")
 
