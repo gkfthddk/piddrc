@@ -453,6 +453,8 @@ def build_datasets(
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
+    pool = getattr(args, "pool", 1)
+
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
@@ -460,7 +462,7 @@ def build_datasets(
         energy_key=args.energy_key,
         stat_file=args.stat_file,
         max_points=args.max_points,
-        pool=args.pool,
+        pool=pool,
         balance_files=balance_train_files,
         max_events=train_limit,
         progress=progress,
@@ -477,7 +479,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
-            pool=args.pool,
+            pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
@@ -493,7 +495,7 @@ def build_datasets(
             energy_key=args.energy_key,
             stat_file=args.stat_file,
             max_points=args.max_points,
-            pool=args.pool,
+            pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
         )
