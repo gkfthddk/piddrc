@@ -26,12 +26,16 @@ from pid.data import EventRecord
 from pid.models.base import ModelOutputs, MultiTaskHead
 from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
+from pid.models.pointset_ptv3 import PointSetTransformerV3
+from pid.models.pointset_mlppp import PointSetMLPpp
 from pid.models.pointset_transformer import PointSetTransformer
 
 MODEL_REGISTRY = {
     "mlp": PointSetMLP,
     "transformer": PointSetTransformer,
     "mamba": PointSetMamba,
+    "ptv3": PointSetTransformerV3,
+    "mlppp": PointSetMLPpp,
     "mamba2": PointSetMamba,
 }
 
@@ -105,8 +109,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "DRcalo3dHits.position.x",
             "DRcalo3dHits.position.y",
             "DRcalo3dHits.position.z",
-            ),
+        ),
         help="Hit-level feature names to load from the HDF5 files",
+    )
+    io_group.add_argument(
+        "--pos_keys",
+        type=str,
+        nargs="+",
+        default=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        help=(
+            "Hit feature names that provide spatial coordinates. The first three entries "
+            "are interpreted as the (x, y, z) positions used by point-neighbourhood "
+            "searches. Additional entries (e.g. timing) can be supplied to expose "
+            "auxiliary position-like features in the batch."
+        ),
     )
     io_group.add_argument(
         "--pool",
@@ -195,10 +215,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Number of attention heads (Transformer only)",
     )
     model_group.add_argument(
-        "--mlp_ratio",
+        "--mlp_expansion",
         type=float,
         default=4.0,
-        help="Feed-forward expansion ratio (Transformer only)",
+        help="Feed-forward expansion ratio (Transformer and MLP++ only)",
+    )
+    model_group.add_argument(
+        "--k_neighbors",
+        type=int,
+        default=16,
+        help="Number of neighbors for local attention (PTv3 only)",
     )
     model_group.add_argument(
         "--dropout",
@@ -358,7 +384,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if args.profile_dir is None:
             args.profile_dir = base_dir / "profile"
     if args.pool > 1:
-        args.hit_features = [feat.replace("DRcalo3dHits",f"DRcalo3dHits{args.pool}") for feat in args.hit_features]
+        args.hit_features = [
+            feat.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for feat in args.hit_features
+        ]
+        args.pos_keys = [
+            key.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for key in args.pos_keys
+        ]
 
     return args
 
@@ -464,6 +495,7 @@ def build_datasets(
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
+        pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
         stat_file=args.stat_file,
@@ -481,6 +513,7 @@ def build_datasets(
         val_dataset = DualReadoutEventDataset(
             [str(path) for path in args.val_files],
             hit_features=args.hit_features,
+            pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
             stat_file=args.stat_file,
@@ -497,6 +530,7 @@ def build_datasets(
         test_dataset = DualReadoutEventDataset(
             [str(path) for path in args.test_files],
             hit_features=args.hit_features,
+            pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
             stat_file=args.stat_file,
@@ -592,7 +626,7 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             hidden_dim=args.hidden_dim,
             depth=args.depth,
             num_heads=args.num_heads,
-            mlp_ratio=args.mlp_ratio,
+            mlp_ratio=args.mlp_expansion,
             **common_kwargs,
         )
     elif model_name in {"mamba", "mamba2"}:
@@ -603,6 +637,26 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             backend=backend,
             **common_kwargs,
         )
+    elif model_name == "ptv3":
+        sample_record = dataset[0]
+        if sample_record.pos is None:
+            raise RuntimeError(
+                "PointSetTransformerV3 requires positional features. "
+                "Provide the coordinate feature names via --pos_keys."
+            )
+        model = model_cls(
+            hidden_dim=args.hidden_dim,
+            depth=args.depth,
+            k_neighbors=args.k_neighbors,
+            **common_kwargs,
+        )
+    elif model_name == "mlppp":
+        model = model_cls(
+            embed_dim=args.hidden_dim,
+            depth=args.depth,
+            expansion=args.mlp_expansion,
+            **common_kwargs,
+            )
     else:  # pragma: no cover - choices enforced by argparse
         raise ValueError(f"Unknown model type: {args.model}")
 

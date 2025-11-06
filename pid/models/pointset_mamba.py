@@ -112,9 +112,6 @@ class PointSetMamba(nn.Module):
             [
                 MambaBlock(
                     hidden_dim,
-                    d_state=hidden_dim // 2,
-                    d_conv=4,
-                    expand=2,
                     dropout=dropout,
                     backend=backend,
                     **backend_kwargs,
