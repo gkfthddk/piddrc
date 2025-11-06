@@ -28,12 +28,14 @@ from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_ptv3 import PointSetTransformerV3
 from pid.models.pointset_mlppp import PointSetMLPpp
+from pid.models.poinset_graph import PointSetGraphNet
 from pid.models.pointset_transformer import PointSetTransformer
 
 MODEL_REGISTRY = {
     "mlp": PointSetMLP,
     "transformer": PointSetTransformer,
     "mamba": PointSetMamba,
+    "graph": PointSetGraphNet,
     "ptv3": PointSetTransformerV3,
     "mlppp": PointSetMLPpp,
     "mamba2": PointSetMamba,
@@ -224,7 +226,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--k_neighbors",
         type=int,
         default=16,
-        help="Number of neighbors for local attention (PTv3 only)",
+        help="Number of neighbors for local attention (PTv3 and Graph models)",
+    )
+    model_group.add_argument(
+        "--dynamic_knn",
+        action="store_true",
+        help="Recompute k-NN graph in each layer (Graph model only)",
     )
     model_group.add_argument(
         "--dropout",
@@ -657,6 +664,14 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             expansion=args.mlp_expansion,
             **common_kwargs,
             )
+    elif model_name == "graph":
+        model = model_cls(
+            embed_dim=args.hidden_dim,
+            depth=args.depth,
+            k_neighbors=args.k_neighbors,
+            dynamic_knn=args.dynamic_knn,
+            **common_kwargs,
+        )
     else:  # pragma: no cover - choices enforced by argparse
         raise ValueError(f"Unknown model type: {args.model}")
 
