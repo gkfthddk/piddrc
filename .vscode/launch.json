@@ -5,7 +5,7 @@
       "type": "debugpy",
       "request": "launch", 
       "name": "Debug Script",
-      "python": "/users/yulee/micromamba/envs/torch290/bin/python3",
+      "python": "${HOME}/micromamba/envs/torch251/bin/python3",
       "program": "${workspaceFolder}/${input:scriptFile}",
       "console": "integratedTerminal",
       "justMyCode": true,
