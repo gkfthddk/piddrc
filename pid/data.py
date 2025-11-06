@@ -174,6 +174,7 @@ class DualReadoutEventDataset(Dataset):
         balance_files: bool = False,
         max_events: Optional[int] = None,
         progress: bool = True,
+        cache_size: int = 64,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -227,6 +228,7 @@ class DualReadoutEventDataset(Dataset):
             self.summary_fn: AmpAwareSummaryFn = self._amp_summary
         else:
             self.summary_fn = self._coerce_summary_fn(summary_fn)
+        self.cache_size = cache_size
         self.cache_file_handles = cache_file_handles
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
@@ -244,6 +246,7 @@ class DualReadoutEventDataset(Dataset):
 
         self._file_handles: MutableMapping[int, h5py.File] = {}
         self._indices: List[Tuple[int, int]] = []
+        self._chunk_cache: Dict[int, Tuple[int, Mapping[str, Any]]] = {}
 
         if class_names is not None:
             self.classes: Tuple[str, ...] = tuple(class_names)
@@ -310,9 +313,30 @@ class DualReadoutEventDataset(Dataset):
         with self._get_handle(file_id) as handle:
             return self._load_event(handle, file_id, event_id)
 
-    def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
-        hits = [np.asarray(handle[feature][event_id]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+    def _get_chunk(self, handle: h5py.File, file_id: int, event_id: int) -> Mapping[str, Any]:
+        chunk_id = event_id // self.cache_size
+        cached = self._chunk_cache.get(file_id)
+        if cached is not None and cached[0] == chunk_id:
+            return cached[1]
+
+        start = chunk_id * self.cache_size
+        stop = min(start + self.cache_size, self._max_events or len(handle[self.label_key]))
+        hits = [np.asarray(handle[feature][start:stop]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
+        
+        #points=np.array(hits).transpose(1,2,0)
+        chunk={
+            "start": start, 
+               "points": points
+               }   
+        self._chunk_cache[file_id] = (chunk_id, chunk)
+        return self._chunk_cache[file_id][1]
+
+    def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
+        chunk = self._get_chunk(handle, file_id, event_id)
+        local_index = event_id - chunk["start"]
+        points = chunk["points"][local_index]
+
         pos_tensor: torch.Tensor | None = None
         if self.pos_keys:
             coord_indices: List[int] = []
@@ -413,7 +437,7 @@ class DualReadoutEventDataset(Dataset):
                 chunk_size = min(max(scan_num_events // 32, 1), 1024)
                 file_indices: List[Tuple[int, int]] = []
                 
-                amp_dataset = handle[self.amp_sum_key][:scan_num_events]
+                #amp_dataset = handle[self.amp_sum_key][:scan_num_events]
                 chunk_iterator = range(0, scan_num_events, chunk_size)
                 if self._progress_enabled:
                     chunk_iterator = tqdm(
@@ -425,7 +449,7 @@ class DualReadoutEventDataset(Dataset):
                     )
                 for start in chunk_iterator:
                     stop = min(start + chunk_size, scan_num_events)
-                    amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
+                    amp_chunk = np.asarray(handle[self.amp_sum_key][start:stop], dtype=np.float64)
                     finite = np.isfinite(amp_chunk)
                     sanitized = np.where(finite, amp_chunk, 0.0)
 
@@ -453,8 +477,16 @@ class DualReadoutEventDataset(Dataset):
 
         if per_file_indices and self._max_events is not None:
             per_file_indices = [entries[: self._max_events] for entries in per_file_indices]
-
-        self._indices = [entry for entries in per_file_indices for entry in entries]
+        rng = np.random.default_rng(12345)
+        cursor = np.zeros(len(per_file_indices), dtype=int)
+        labels = list(range(len(per_file_indices)))
+        total = sum(len(entries) for entries in per_file_indices)
+        while len(self._indices) < total:
+            l= rng.choice(labels)
+            if cursor[l] < len(per_file_indices[l]):
+                i = cursor[l]
+                self._indices.append(per_file_indices[l][i])
+                cursor[l] += 1
 
     def _estimate_amplitude_sum_threshold(self) -> float:
         """Estimate a robust amplitude sum threshold for masking outliers."""
@@ -531,6 +563,7 @@ class DualReadoutEventDataset(Dataset):
         for handle in self._file_handles.values():
             handle.close()
         self._file_handles.clear()
+        self._chunk_cache.clear()
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:

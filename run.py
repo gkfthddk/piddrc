@@ -452,12 +452,16 @@ def _split_dataset(
 
     generator = torch.Generator()
     generator.manual_seed(seed)
-    subsets = random_split(dataset, lengths, generator=generator)
 
-    subset_iter = iter(subsets)
-    train_subset = next(subset_iter)
-    val_subset = next(subset_iter) if include_val else None
-    test_subset = next(subset_iter) if include_test else None
+    train_subset = Subset(dataset, list(range(train_len)))
+    val_subset = Subset(dataset, list(range(train_len, train_len + val_len))) if include_val else None
+    test_subset = Subset(dataset, list(range(train_len + val_len, total))) if include_test else None
+    
+    #subsets = random_split(dataset, lengths, generator=generator)
+    #subset_iter = iter(subsets)
+    #train_subset = next(subset_iter)
+    #val_subset = next(subset_iter) if include_val else None
+    #test_subset = next(subset_iter) if include_test else None
 
     def _indices_to_set(subset: Dataset[EventRecord] | None) -> set[int]:
         if subset is None:
@@ -694,7 +698,7 @@ def build_dataloaders(
         "persistent_workers": num_workers > 0,
     }
 
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+    train_loader = DataLoader(train_dataset, shuffle=False, **loader_kwargs)
     val_loader = None
     if val_dataset is not None:
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
@@ -706,7 +710,7 @@ def build_dataloaders(
 
 def print_model_summary(
     model: nn.Module,
-    train_loader: DataLoader,
+    probe_loader: DataLoader,
     device: torch.device,
     *,
     enabled: bool,
@@ -722,7 +726,7 @@ def print_model_summary(
             "Install it via 'pip install torchinfo'."
         ) from exc
 
-    sample_batch = next(iter(train_loader))
+    sample_batch = next(iter(probe_loader))
     sample_batch = {
         key: tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
         for key, tensor in sample_batch.items()
