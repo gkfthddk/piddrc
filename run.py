@@ -109,8 +109,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "DRcalo3dHits.position.x",
             "DRcalo3dHits.position.y",
             "DRcalo3dHits.position.z",
-            ),
+        ),
         help="Hit-level feature names to load from the HDF5 files",
+    )
+    io_group.add_argument(
+        "--pos_keys",
+        type=str,
+        nargs="+",
+        default=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+            "DRcalo3dHits.time",
+        ),
+        help=(
+            "Hit feature names that provide spatial coordinates. The first three entries "
+            "are interpreted as the (x, y, z) positions used by point-neighbourhood "
+            "searches. Additional entries (e.g. timing) are still exposed for summaries."
+        ),
     )
     io_group.add_argument(
         "--pool",
@@ -368,7 +384,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if args.profile_dir is None:
             args.profile_dir = base_dir / "profile"
     if args.pool > 1:
-        args.hit_features = [feat.replace("DRcalo3dHits",f"DRcalo3dHits{args.pool}") for feat in args.hit_features]
+        args.hit_features = [
+            feat.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for feat in args.hit_features
+        ]
+        args.pos_keys = [
+            key.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for key in args.pos_keys
+        ]
 
     return args
 
@@ -474,6 +495,7 @@ def build_datasets(
     base_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
         hit_features=args.hit_features,
+        pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
         stat_file=args.stat_file,
@@ -491,6 +513,7 @@ def build_datasets(
         val_dataset = DualReadoutEventDataset(
             [str(path) for path in args.val_files],
             hit_features=args.hit_features,
+            pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
             stat_file=args.stat_file,
@@ -507,6 +530,7 @@ def build_datasets(
         test_dataset = DualReadoutEventDataset(
             [str(path) for path in args.test_files],
             hit_features=args.hit_features,
+            pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
             stat_file=args.stat_file,
@@ -614,6 +638,12 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
             **common_kwargs,
         )
     elif model_name == "ptv3":
+        sample_record = dataset[0]
+        if sample_record.pos is None:
+            raise RuntimeError(
+                "PointSetTransformerV3 requires positional features. "
+                "Provide the coordinate feature names via --pos_keys."
+            )
         model = model_cls(
             hidden_dim=args.hidden_dim,
             depth=args.depth,
