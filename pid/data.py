@@ -160,7 +160,11 @@ class DualReadoutEventDataset(Dataset):
         pool: int = 1,
         is_cherenkov_key: str = "DRcalo3dHits.type",
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
-        pos_keys: Optional[List[str]] = ["DRcalo3dHits.position.x", "DRcalo3dHits.position.y", "DRcalo3dHits.position.z","DRcalo3dHits.time"],
+        pos_keys: Optional[List[str]] = [
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ],
         amp_sum_clip_percentile: Optional[float] = 0.999,
         amp_sum_clip_multiplier: float = 1.5,
         amp_sum_clip_sample_size: int = 16_384,

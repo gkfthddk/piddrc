@@ -120,12 +120,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "DRcalo3dHits.position.x",
             "DRcalo3dHits.position.y",
             "DRcalo3dHits.position.z",
-            "DRcalo3dHits.time",
         ),
         help=(
             "Hit feature names that provide spatial coordinates. The first three entries "
             "are interpreted as the (x, y, z) positions used by point-neighbourhood "
-            "searches. Additional entries (e.g. timing) are still exposed for summaries."
+            "searches. Additional entries (e.g. timing) can be supplied to expose "
+            "auxiliary position-like features in the batch."
         ),
     )
     io_group.add_argument(
