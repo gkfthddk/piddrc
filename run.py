@@ -866,11 +866,23 @@ def main() -> None:
 
     device = torch.device(args.device)
 
-    base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
-    print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
-    model = build_model(args, base_dataset)
+    probe_dataset = DualReadoutEventDataset(
+        [str(path) for path in args.train_files],
+        hit_features=args.hit_features,
+        pos_keys=list(args.pos_keys),
+        label_key=args.label_key,
+        energy_key=args.energy_key,
+        stat_file=args.stat_file,
+        max_points=args.max_points,
+        pool=getattr(args, "pool", 1),
+        balance_files=getattr(args, "balance_train_files", False),
+        max_events=1,
+        cache_file_handles=False,
+        progress=False,
+    )
+    model = build_model(args, probe_dataset)
     model.to(device)
-    
+
     # Add torch.compile for a potential speed-up on PyTorch 2.0+
     if hasattr(torch, "compile") and args.compile:
         compile_mode = "reduce-overhead"
@@ -879,19 +891,34 @@ def main() -> None:
         print(f"Compiling model with torch.compile(mode='{compile_mode}')...")
         model = torch.compile(model, mode=compile_mode)
 
+    probe_loader = DataLoader(
+        probe_dataset,
+        batch_size=1,
+        collate_fn=collate_events,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+    )
+
+    print_model_summary(
+        model,
+        probe_loader,
+        device,
+        enabled=args.model_summary,
+    )
+
+    del probe_loader
+    del probe_dataset
+
+    base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
+    print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
+
     train_loader, val_loader, test_loader = build_dataloaders(
         train_dataset,
         val_dataset,
         test_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-    )
-
-    print_model_summary(
-        model,
-        train_loader,
-        device,
-        enabled=args.model_summary,
     )
 
     trainer, optimizer = configure_trainer(
