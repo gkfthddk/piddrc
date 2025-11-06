@@ -43,9 +43,9 @@ def overflow_h5(tmp_path):
     return file_path
 
 
-def test_amplitude_sum_masking(overflow_h5, stats_file):
+def test_amplitude_sum_masking(write_two_file, stats_file):
     dataset = DualReadoutEventDataset(
-        [str(overflow_h5)],
+        [write_two_file],
         hit_features=(
             "DRcalo3dHits.amplitude_sum",
             "DRcalo3dHits.type",
@@ -80,7 +80,7 @@ def test_amplitude_sum_masking(overflow_h5, stats_file):
     assert sorted(seen_event_ids) == [0, 1, 2]
 
 
-def test_cache_file_handles_disabled_does_not_leak(overflow_h5, stats_file):
+def test_cache_file_handles_disabled_does_not_leak(write_two_file, stats_file):
     dataset = DualReadoutEventDataset(
         [str(overflow_h5)],
         hit_features=(
@@ -131,6 +131,12 @@ def _write_simple_file(path, num_events, label_value):
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
 
+def write_two_file(tmp_path):
+    file_a = tmp_path / "a.h5"
+    file_b = tmp_path / "b.h5"
+    _write_simple_file(file_a, 5, b"11")
+    _write_simple_file(file_b, 3, b"211")
+    return file_a, file_b
 
 def test_balance_and_limit(tmp_path, stats_file):
     file_a = tmp_path / "a.h5"
