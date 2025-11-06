@@ -174,7 +174,7 @@ class DualReadoutEventDataset(Dataset):
         balance_files: bool = False,
         max_events: Optional[int] = None,
         progress: bool = True,
-        cache_size: int = 64,
+        cache_size: int = 1024,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -310,8 +310,7 @@ class DualReadoutEventDataset(Dataset):
 
     def __getitem__(self, index: int) -> EventRecord:
         file_id, event_id = self._indices[index]
-        with self._get_handle(file_id) as handle:
-            return self._load_event(handle, file_id, event_id)
+        return self._load_event(file_id, event_id)
 
     def _get_chunk(self, handle: h5py.File, file_id: int, event_id: int) -> Mapping[str, Any]:
         chunk_id = event_id // self.cache_size
@@ -323,19 +322,39 @@ class DualReadoutEventDataset(Dataset):
         stop = min(start + self.cache_size, self._max_events or len(handle[self.label_key]))
         hits = [np.asarray(handle[feature][start:stop]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
-        
-        #points=np.array(hits).transpose(1,2,0)
+
+        def _read_optional(dataset_name: str) -> float:
+            if dataset_name not in handle:
+                return None
+            value = handle[dataset_name][start:stop]
+            array = np.asarray(value, dtype=np.float32)
+            if array.size == 0:
+                return None
+            return array
+
+        c_amp = _read_optional("C_amp")
+        s_amp = _read_optional("S_amp")
+        summary = self.summary_fn(c_amp, s_amp, points, self.feature_to_index)
+        label_value = handle[self.label_key][start:stop]
+        energy = handle[self.energy_key][start:stop]
         chunk={
             "start": start, 
-               "points": points
-               }   
+            "points": points,
+            "summary": summary,
+            "label_value": label_value,
+            "energy": energy
+            }   
         self._chunk_cache[file_id] = (chunk_id, chunk)
         return self._chunk_cache[file_id][1]
 
-    def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
-        chunk = self._get_chunk(handle, file_id, event_id)
+    def _load_event(self, file_id: int, event_id: int) -> EventRecord:
+        with self._get_handle(file_id) as handle:
+            chunk = self._get_chunk(handle, file_id, event_id)
         local_index = event_id - chunk["start"]
         points = chunk["points"][local_index]
+        label_value = chunk["label_value"][local_index]
+        summary = chunk["summary"][local_index]
+        energy = chunk["energy"][local_index]
 
         pos_tensor: torch.Tensor | None = None
         if self.pos_keys:
@@ -359,27 +378,13 @@ class DualReadoutEventDataset(Dataset):
         # not have to materialize the pre-computed amplitude summaries. When the
         # datasets are absent we fall back to zeros and let the summary function
         # derive the values from the hit-level features instead.
-        def _read_optional(dataset_name: str) -> float:
-            if dataset_name not in handle:
-                return 0.0
-            value = handle[dataset_name][event_id]
-            array = np.asarray(value, dtype=np.float32)
-            if array.size == 0:
-                return 0.0
-            return float(array.reshape(-1)[0])
 
-        c_amp = _read_optional("C_amp")
-        s_amp = _read_optional("S_amp")
-
-        summary = self.summary_fn(c_amp, s_amp, points, self.feature_to_index)
-        label_value = handle[self.label_key][event_id]
         label_name = _decode_label(label_value)
         if label_name not in self.class_to_index:
             raise KeyError(f"Encountered label '{label_name}' that is not part of the class map {self.class_to_index}")
         label = self.class_to_index[label_name]
-        energy = np.asarray(handle[self.energy_key][event_id], dtype=np.float32)
+        
         energy = np.atleast_1d(energy)
-
         return EventRecord(
             points=torch.from_numpy(points),
             summary=torch.from_numpy(summary.astype(np.float32)),
@@ -574,22 +579,22 @@ class DualReadoutEventDataset(Dataset):
     # ------------------------------------------------------------------
     # Summary feature engineering
     # ------------------------------------------------------------------
-    def _amp_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+    def _amp_summary(self, C_amp: list, S_amp: list, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute simple amplitude-based summary features for one event."""
 
         is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
-        if(C_amp>0):
-            c_sum = float(C_amp)
+        if C_amp is not None:
+            c_sum = C_amp
         else:
             c = points[is_cherenkov, index_map[self.amp_sum_key]]
             c_sum = float(np.sum(c))
-        if(S_amp>0):
-            s_sum = float(S_amp)
+        if S_amp is not None:
+            s_sum = S_amp
         else:
             s = points[~is_cherenkov, index_map[self.amp_sum_key]]
             s_sum = float(np.sum(s))
         stats= [s_sum, c_sum, s_sum + c_sum]
-        return np.asarray(stats, dtype=np.float32)
+        return np.asarray(stats, dtype=np.float32).transpose()
     
     def _dist_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""
