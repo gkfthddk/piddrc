@@ -207,7 +207,7 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
         handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
         handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
 
-        labels = np.array(["11"], dtype="S")
+        labels = np.array(["11","211"], dtype="S")
         energies = np.array([10.0], dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
