@@ -240,6 +240,11 @@ def test_build_datasets_auto_split(dummy_h5, stats_file):
         val_files=None,
         test_files=None,
         hit_features=HIT_FEATURES,
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
         stat_file=str(stats_file),
