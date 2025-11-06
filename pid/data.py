@@ -255,7 +255,6 @@ class DualReadoutEventDataset(Dataset):
         self._log(f"Discovered {len(self.classes)} class(es)")
 
         self._log("Estimating amplitude-sum threshold")
-        #self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
         stats = None
         if isinstance(self._channel_stat, Mapping):
             stats = self._channel_stat.get("S_amp")
@@ -372,13 +371,12 @@ class DualReadoutEventDataset(Dataset):
     def _discover_classes(self) -> Tuple[str, ...]:
         labels: List[str] = []
         for file_path in self.files:
-            self._log(f"  Reading labels from {file_path}")
             with h5py.File(file_path, "r") as handle:
                 if(self._max_events is None):
-                    data = handle[self.label_key][:]
+                    data = handle[self.label_key][:1]
                 else:
-                    data = handle[self.label_key][:self._max_events]
-                decoded = [_decode_label(value) for value in data]
+                    data = handle[self.label_key][:1]
+                decoded = [_decode_label(value) for value in set(data)]
                 labels.extend(decoded)
         unique_labels = sorted(set(labels))
         return tuple(unique_labels)
@@ -396,26 +394,26 @@ class DualReadoutEventDataset(Dataset):
             )
             with h5py.File(file_path, "r") as handle:
                 num_events = len(handle[self.label_key])
-
-                if not filter_amp or self.amp_sum_key not in handle:
-                    file_indices = [(file_id, event_id) for event_id in range(num_events)]
-                    per_file_indices.append(file_indices)
-                    continue
-
-                amp_dataset = handle[self.amp_sum_key]
-                if num_events == 0:
-                    per_file_indices.append([])
-                    continue
-
-                chunk_size = min(max(num_events // 32, 1), 1024)
-                file_indices: List[Tuple[int, int]] = []
-
+                
                 # If max_events is set, we can limit the number of chunks to scan
                 scan_num_events = num_events
                 if self._max_events is not None:
                     # Estimate the number of events to scan. Add a buffer.
-                    scan_num_events = min(num_events, int(self._max_events * 1.2))
+                    scan_num_events = min(num_events, self._max_events)
 
+                if not filter_amp or self.amp_sum_key not in handle:
+                    file_indices = [(file_id, event_id) for event_id in range(scan_num_events)]
+                    per_file_indices.append(file_indices)
+                    continue
+                
+                if scan_num_events == 0:
+                    per_file_indices.append([])
+                    continue
+
+                chunk_size = min(max(scan_num_events // 32, 1), 1024)
+                file_indices: List[Tuple[int, int]] = []
+                
+                amp_dataset = handle[self.amp_sum_key][:scan_num_events]
                 chunk_iterator = range(0, scan_num_events, chunk_size)
                 if self._progress_enabled:
                     chunk_iterator = tqdm(
@@ -426,7 +424,7 @@ class DualReadoutEventDataset(Dataset):
                         total=len(chunk_iterator),
                     )
                 for start in chunk_iterator:
-                    stop = min(start + chunk_size, num_events)
+                    stop = min(start + chunk_size, scan_num_events)
                     amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
                     finite = np.isfinite(amp_chunk)
                     sanitized = np.where(finite, amp_chunk, 0.0)
