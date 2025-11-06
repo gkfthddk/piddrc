@@ -136,7 +136,7 @@ def test_balance_and_limit(tmp_path, stats_file):
     file_a = tmp_path / "a.h5"
     file_b = tmp_path / "b.h5"
     _write_simple_file(file_a, 5, b"11")
-    _write_simple_file(file_b, 3, b"22")
+    _write_simple_file(file_b, 3, b"211")
 
     common_kwargs = dict(
         hit_features=(
