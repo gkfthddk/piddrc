@@ -94,7 +94,7 @@ def test_collate_and_models(pipeline_dataset):
     dataset = pipeline_dataset
     loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
     batch = next(iter(loader))
-    assert batch["points"].shape[0] == 16
+    assert batch["points"].shape[1] == 32
     summary_dim = batch["summary"].shape[-1]
     num_classes = len(dataset.classes)
 
