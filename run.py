@@ -773,8 +773,10 @@ def configure_trainer(
     log_every: int,
     max_grad_norm: float | None,
     use_amp: bool,
+    checkpoint_path: Path | None,
     show_progress: bool,
     lr_scheduler_name: str | None,
+    freeze_sigma: int,
     profile: bool,
     profile_dir: Path | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
@@ -785,8 +787,10 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         label_smoothing=label_smoothing, 
         use_amp=use_amp,
+        checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
         show_progress=show_progress,
         early_stopping_patience=5,
+        freeze_sigma=freeze_sigma,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
     )
@@ -935,7 +939,9 @@ def main() -> None:
         max_grad_norm=args.max_grad_norm,
         use_amp=args.use_amp,
         show_progress=args.progress_bar,
+        checkpoint_path=args.checkpoint,
         lr_scheduler_name=args.lr_scheduler,
+        freeze_sigma=args.freeze_sigma,
         profile=args.profile,
         profile_dir=args.profile_dir,
     )

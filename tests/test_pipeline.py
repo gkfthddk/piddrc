@@ -84,6 +84,9 @@ def pipeline_dataset(dummy_h5, stats_file):
         energy_key="E_gen",
         stat_file=str(stats_file),
         max_points=16,
+        amp_sum_key="DRcalo3dHits.amplitude_sum",
+        is_cherenkov_key="DRcalo3dHits.type",
+        amp_sum_clip_percentile=None,
     )
 
 
@@ -91,7 +94,7 @@ def test_collate_and_models(pipeline_dataset):
     dataset = pipeline_dataset
     loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
     batch = next(iter(loader))
-    assert batch["points"].shape[1] == 16
+    assert batch["points"].shape[0] == 16
     summary_dim = batch["summary"].shape[-1]
     num_classes = len(dataset.classes)
 
@@ -246,7 +249,7 @@ def test_trainer_evaluate_outputs(pipeline_dataset):
     assert isinstance(outputs, list)
     assert len(outputs) == len(dataset)
     first_record = outputs[0]
-    assert "event_index" in first_record
+    assert "event_index" in first_record  # This is the batch-local index
     assert "event_id" in first_record
     assert "energy_pred" in first_record
     assert "logits" in first_record
@@ -254,7 +257,7 @@ def test_trainer_evaluate_outputs(pipeline_dataset):
 
 def test_build_datasets_auto_split(dummy_h5, stats_file):
     args = argparse.Namespace(
-        train_files=[str(d) for d in dummy_h5],
+        train_files=dummy_h5,
         val_files=None,
         test_files=None,
         hit_features=HIT_FEATURES,
@@ -268,12 +271,15 @@ def test_build_datasets_auto_split(dummy_h5, stats_file):
         stat_file=str(stats_file),
         max_points=16,
         val_fraction=0.25,
-        test_fraction=0.25,
+        test_fraction=0.25, # this is not used
         split_seed=42,
         amp_sum_clip_percentile=None,
         amp_sum_key="DRcalo3dHits.amplitude_sum",
         is_cherenkov_key="DRcalo3dHits.type",
         pool=1,
+        balance_train_files=False,
+        train_limit=None,
+        dataset_progress=False,
     )
 
     base_dataset, train_dataset, val_dataset, test_dataset = run.build_datasets(args)

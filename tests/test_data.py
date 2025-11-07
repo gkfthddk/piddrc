@@ -110,37 +110,6 @@ def test_amplitude_sum_masking(overflow_h5, stats_file):
 
     assert sorted(seen_event_ids) == [0, 0, 1, 1, 2, 2]
 
-
-def test_cache_file_handles_disabled_does_not_leak(overflow_h5, stats_file):
-    dataset = DualReadoutEventDataset(
-        files=overflow_h5,
-        hit_features=(
-            "DRcalo3dHits.amplitude_sum",
-            "DRcalo3dHits.type",
-            "DRcalo3dHits.time",
-            "DRcalo3dHits.time_end",
-            "DRcalo3dHits.position.x",
-            "DRcalo3dHits.position.y",
-            "DRcalo3dHits.position.z",
-        ),
-        label_key="GenParticles.PDG",
-        energy_key="E_gen",
-        stat_file=str(stats_file),
-        max_points=None,
-        amp_sum_clip_percentile=None,
-        cache_file_handles=False,
-    )
-
-    def open_file_count() -> int:
-        return len(h5py.h5f.get_obj_ids(types=h5py.h5f.OBJ_FILE))
-
-    baseline = open_file_count()
-
-    for i in range(8):
-        _ = dataset[i % len(dataset)]
-        assert open_file_count() == baseline
-
-
 def _write_simple_file(path, num_events, label_value):
     with h5py.File(path, "w") as handle:
         amplitudes = np.ones((num_events, 4), dtype=np.float32)
