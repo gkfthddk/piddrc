@@ -562,7 +562,7 @@ class DualReadoutEventDataset(Dataset):
         print(f"[DualReadoutEventDataset] {message}", flush=True)
 
     def close(self) -> None:
-        self._chunk_cache.clear()
+        self._cache.clear()
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
