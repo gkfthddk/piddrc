@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union, cast
@@ -143,6 +144,14 @@ class DualReadoutEventDataset(Dataset):
     progress:
         When ``False`` suppress informational progress messages that are printed
         while the dataset scans the input files during initialization.
+    cache_size:
+        Number of events to read per on-disk chunk when filling the in-memory
+        cache. Larger values amortize disk access at the cost of more temporary
+        memory per cached chunk.
+    max_cache_chunks:
+        Maximum number of cached chunks to retain per worker. Set to ``None``
+        (the default) to disable eviction and keep all loaded chunks, matching
+        the original unbounded caching behaviour.
     """
 
     def __init__(
@@ -171,6 +180,7 @@ class DualReadoutEventDataset(Dataset):
         max_events: Optional[int] = None,
         progress: bool = True,
         cache_size: int = 1024,
+        max_cache_chunks: Optional[int] = None,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -225,6 +235,12 @@ class DualReadoutEventDataset(Dataset):
         else:
             self.summary_fn = self._coerce_summary_fn(summary_fn)
         self.cache_size = cache_size
+        if max_cache_chunks is not None:
+            if max_cache_chunks <= 0:
+                raise ValueError("max_cache_chunks must be positive or None to disable caching limits")
+            self._max_cached_chunks: Optional[int] = int(max_cache_chunks)
+        else:
+            self._max_cached_chunks = None
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative when provided")
@@ -240,7 +256,7 @@ class DualReadoutEventDataset(Dataset):
         self._amp_sum_threshold: float = float("inf")
 
         self._indices: List[Tuple[int, int]] = []
-        self._cache: MutableMapping[int, MutableMapping[Tuple[int, int], Mapping[str, Any]]] = {}
+        self._cache: MutableMapping[int, OrderedDict[Tuple[int, int], Mapping[str, Any]]] = {}
 
         if class_names is not None:
             self.classes: Tuple[str, ...] = tuple(class_names)
@@ -309,21 +325,28 @@ class DualReadoutEventDataset(Dataset):
         worker_info = torch.utils.data.get_worker_info()
         worker_id = worker_info.id if worker_info is not None else 0
         if worker_id not in self._cache:
-             # Initialize cache for this worker (this is safe in multiprocessing)
-             self._cache[worker_id] = {}
+            # Initialize cache for this worker (this is safe in multiprocessing)
+            self._cache[worker_id] = OrderedDict()
+        worker_cache = self._cache[worker_id]
         # --- 2. Load chunk into cache if needed ---
-        if cache_key not in self._cache[worker_id]:
+        if cache_key not in worker_cache:
             try:
                 with h5py.File(self.files[file_id], "r") as handle:
                     # Store in *worker-local* cache
-                    self._cache[worker_id][cache_key] = self._get_chunk(handle, chunk_start)
+                    worker_cache[cache_key] = self._get_chunk(handle, chunk_start)
+                    worker_cache.move_to_end(cache_key)
+                    if self._max_cached_chunks is not None:
+                        while len(worker_cache) > self._max_cached_chunks:
+                            worker_cache.popitem(last=False)
                 # File handle is now closed. This is safe.
             except Exception as e:
                 self._log(f"ERROR: Worker {worker_id} failed to load chunk {cache_key} from {self.files[file_id]}: {e}")
                 # Fallback: get a different item (use modulo for safety)
                 return self.__getitem__((index + 1) % len(self))
+        else:
+            worker_cache.move_to_end(cache_key)
         # --- 3. Retrieve event from cache ---
-        chunk_data = self._cache[worker_id][cache_key]
+        chunk_data = worker_cache[cache_key]
         local_index = event_id - chunk_start
         
         try:
