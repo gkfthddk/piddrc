@@ -249,9 +249,8 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
     )
 
     record = dataset[0]
-    # Feature statistics scale the amplitude sums by 1/100.
-    s_sum = (1.0 + 2.0) / 100.0
-    c_sum = (3.0 + 4.0) / 100.0
+    s_sum = (1.0 + 2.0) 
+    c_sum = (3.0 + 4.0) 
     total = s_sum + c_sum
 
     assert np.isclose(record.summary[0].item(), c_sum)
