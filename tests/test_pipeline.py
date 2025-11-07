@@ -94,7 +94,14 @@ def test_collate_and_models(pipeline_dataset):
     dataset = pipeline_dataset
     loader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=collate_events)
     batch = next(iter(loader))
-    assert batch["points"].shape[1] == 32
+    if dataset.max_points is not None:
+        assert batch["points"].shape[1] == dataset.max_points
+    else:
+        # When ``max_points`` is disabled we expect the batch to pad to the
+        # maximum number of hits observed in the sampled events, which is the
+        # largest number of ``True`` entries in the per-event mask.
+        max_hits_in_batch = int(batch["mask"].sum(dim=1).max().item())
+        assert batch["points"].shape[1] == max_hits_in_batch
     summary_dim = batch["summary"].shape[-1]
     num_classes = len(dataset.classes)
 
