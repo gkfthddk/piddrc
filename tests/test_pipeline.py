@@ -44,13 +44,13 @@ HIT_FEATURES = (
 
 @pytest.fixture
 def dummy_h5(tmp_path):
-    file_path = tmp_path / "dummy.h5"
+    file_path1 = tmp_path / "dummy1.h5"
     rng = np.random.default_rng(1234)
-    with h5py.File(file_path, "w") as f:
+    with h5py.File(file_path1, "w") as f:
         for feature in HIT_FEATURES:
             data = rng.normal(size=(8, 32)).astype(np.float32)
             f.create_dataset(feature, data=data)
-        labels = np.array(["11", "211"] * 4, dtype="S")
+        labels = np.array(["11"] * 8, dtype="S")
         energies = rng.uniform(5, 50, size=8).astype(np.float32)
         c_amp = rng.uniform(100, 500, size=8).astype(np.float32)
         s_amp = rng.uniform(2000, 8000, size=8).astype(np.float32)
@@ -58,13 +58,27 @@ def dummy_h5(tmp_path):
         f.create_dataset("S_amp", data=s_amp)
         f.create_dataset("GenParticles.PDG", data=labels)
         f.create_dataset("E_gen", data=energies)
-    return file_path
+    file_path2 = tmp_path / "dummy2.h5"
+    rng = np.random.default_rng(1234)
+    with h5py.File(file_path2, "w") as f:
+        for feature in HIT_FEATURES:
+            data = rng.normal(size=(8, 32)).astype(np.float32)
+            f.create_dataset(feature, data=data)
+        labels = np.array(["211"] * 8, dtype="S")
+        energies = rng.uniform(5, 50, size=8).astype(np.float32)
+        c_amp = rng.uniform(100, 500, size=8).astype(np.float32)
+        s_amp = rng.uniform(2000, 8000, size=8).astype(np.float32)
+        f.create_dataset("C_amp", data=c_amp)
+        f.create_dataset("S_amp", data=s_amp)
+        f.create_dataset("GenParticles.PDG", data=labels)
+        f.create_dataset("E_gen", data=energies)
+    return file_path1, file_path2
 
 
 @pytest.fixture
 def pipeline_dataset(dummy_h5, stats_file):
     return DualReadoutEventDataset(
-        [str(dummy_h5)],
+        [dummy_h5],
         hit_features=HIT_FEATURES,
         label_key="GenParticles.PDG",
         energy_key="E_gen",
@@ -176,7 +190,7 @@ def test_instance_name_sets_default_artifact_paths(dummy_h5, monkeypatch):
 
     args = run.parse_args([
         "--train_files",
-        str(dummy_h5),
+        dummy_h5,
         "--name",
         "experiment_a",
     ])

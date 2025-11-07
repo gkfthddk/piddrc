@@ -16,8 +16,8 @@ from pid.data import DualReadoutEventDataset
 
 @pytest.fixture()
 def overflow_h5(tmp_path):
-    file_path = tmp_path / "overflow.h5"
-    with h5py.File(file_path, "w") as handle:
+    file_path1 = tmp_path / "overflow2.h5"
+    with h5py.File(file_path1, "w") as handle:
         # Build a tiny dataset with one obvious outlier.
         amplitudes = np.full((4, 8), 10.0, dtype=np.float32)
         amplitudes[3, :] = 1e9
@@ -35,7 +35,34 @@ def overflow_h5(tmp_path):
         handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
         handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
 
-        labels = np.array(["11", "211", "11", "211"], dtype="S")
+        labels = np.array(["11", "11", "11", "11"], dtype="S")
+        energies = np.full(4, 42.0, dtype=np.float32)
+        c_amp = np.full(4, 300, dtype=np.float32)
+        s_amp = np.full(4, 6000, dtype=np.float32)
+        handle.create_dataset("GenParticles.PDG", data=labels)
+        handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
+    file_path2 = tmp_path / "overflow2.h5"
+    with h5py.File(file_path2, "w") as handle:
+        # Build a tiny dataset with one obvious outlier.
+        amplitudes = np.full((4, 8), 10.0, dtype=np.float32)
+        amplitudes[3, :] = 1e9
+        types = np.zeros((4, 8), dtype=np.float32)
+        types[:, 4:] = 1.0  # mark last four hits as Cherenkov
+        time = np.linspace(0.0, 1.0, 8, dtype=np.float32)
+        time = np.tile(time, (4, 1))
+        zeros = np.zeros_like(amplitudes)
+
+        handle.create_dataset("DRcalo3dHits.amplitude_sum", data=amplitudes)
+        handle.create_dataset("DRcalo3dHits.type", data=types)
+        handle.create_dataset("DRcalo3dHits.time", data=time)
+        handle.create_dataset("DRcalo3dHits.time_end", data=time + 0.1)
+        handle.create_dataset("DRcalo3dHits.position.x", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
+
+        labels = np.array(["211", "211", "211", "211"], dtype="S")
         energies = np.full(4, 42.0, dtype=np.float32)
         c_amp = np.full(4, 300, dtype=np.float32)
         s_amp = np.full(4, 6000, dtype=np.float32)
@@ -44,7 +71,7 @@ def overflow_h5(tmp_path):
         handle.create_dataset("C_amp", data=c_amp)
         handle.create_dataset("S_amp", data=s_amp)
 
-    return file_path
+    return file_path1, file_path2
 
 
 def test_amplitude_sum_masking(write_two_file, stats_file):
@@ -86,7 +113,7 @@ def test_amplitude_sum_masking(write_two_file, stats_file):
 
 def test_cache_file_handles_disabled_does_not_leak(write_two_file, stats_file):
     dataset = DualReadoutEventDataset(
-        [str(overflow_h5)],
+        [overflow_h5],
         hit_features=(
             "DRcalo3dHits.amplitude_sum",
             "DRcalo3dHits.type",
