@@ -338,7 +338,7 @@ class DualReadoutEventDataset(Dataset):
     def _get_chunk(self, handle: h5py.File, chunk_start: int) -> Mapping[str, Any]:
         start = chunk_start
         stop = min(start + self.cache_size, len(handle[self.label_key]))
-        hits = [np.asarray(handle[feature][start:stop][:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+        hits = [np.asarray(handle[feature][start:stop,:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
 
         def _read_optional(dataset_name: str) -> float:

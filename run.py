@@ -53,9 +53,9 @@ def _write_test_outputs(records: Sequence[Dict[str, Any]], destination: Path | N
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    gpus_parser = argparse.ArgumentParser(add_help=False)
-    gpus_parser.add_argument(
-        "--gpus",
+    gpu_parser = argparse.ArgumentParser(add_help=False)
+    gpu_parser.add_argument(
+        "--gpu",
         type=str,
         default=None,
         help=(
@@ -64,10 +64,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
 
-    gpus_args, _ = gpus_parser.parse_known_args(argv)
-    if gpus_args.gpus is not None:
+    gpu_args, remaining_argv = gpu_parser.parse_known_args(argv)
+    if gpu_args.gpu is not None:
         os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpus_args.gpus
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_args.gpu
 
     parser = argparse.ArgumentParser(description="Train dual-readout point-set models")
 
@@ -276,15 +276,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
-        "--gpus",
-        type=str,
-        default=gpus_args.gpus,
-        help=(
-            "Optional comma-separated list of CUDA device indices to expose via "
-            "CUDA_VISIBLE_DEVICES"
-        ),
-    )
-    misc_group.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -372,7 +363,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.set_defaults(dataset_progress=True, progress_bar=True)
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining_argv)
 
     setattr(args, "instance_name", args.name)
 
@@ -397,6 +388,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.pos_keys = [
             key.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for key in args.pos_keys
         ]
+    
+    # If a single GPU is specified, default device to cuda:0
+    if gpu_args.gpu and "," not in gpu_args.gpu and args.device == "cuda":
+        args.device = "cuda:0"
 
     return args
 
