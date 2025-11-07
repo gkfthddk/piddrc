@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+res.sh
 toh5_legacy.py
 h5s
 h5

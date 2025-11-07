@@ -24,6 +24,7 @@ class TrainingConfig:
     max_grad_norm: Optional[float] = None
     label_smoothing: float = 0.0
     use_amp: bool = True
+    checkpoint_path: Optional[str] = None
     warmup_steps: int = 0
     early_stopping_patience: Optional[int] = None
     early_stopping_min_delta: float = 0.0
@@ -89,6 +90,15 @@ class Trainer:
                 warmup_steps = self.config.warmup_steps
                 if warmup_steps <= 0 or self._global_step >= warmup_steps:
                     self.scheduler.step()
+
+            if self.config.checkpoint_path and epoch % self.config.log_every == 0:
+                payload = {
+                    "model_state": self.model.state_dict(),
+                    "optimizer_state": self.optimizer.state_dict(),
+                }
+                torch.save(payload, self.config.checkpoint_path)
+                print(f"Epoch {epoch}: Checkpoint saved to {self.config.checkpoint_path}")
+
         return history
 
     def evaluate(

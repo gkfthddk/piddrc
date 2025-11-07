@@ -452,12 +452,16 @@ def _split_dataset(
 
     generator = torch.Generator()
     generator.manual_seed(seed)
-    subsets = random_split(dataset, lengths, generator=generator)
 
-    subset_iter = iter(subsets)
-    train_subset = next(subset_iter)
-    val_subset = next(subset_iter) if include_val else None
-    test_subset = next(subset_iter) if include_test else None
+    train_subset = Subset(dataset, list(range(train_len)))
+    val_subset = Subset(dataset, list(range(train_len, train_len + val_len))) if include_val else None
+    test_subset = Subset(dataset, list(range(train_len + val_len, total))) if include_test else None
+    
+    #subsets = random_split(dataset, lengths, generator=generator)
+    #subset_iter = iter(subsets)
+    #train_subset = next(subset_iter)
+    #val_subset = next(subset_iter) if include_val else None
+    #test_subset = next(subset_iter) if include_test else None
 
     def _indices_to_set(subset: Dataset[EventRecord] | None) -> set[int]:
         if subset is None:
@@ -694,7 +698,7 @@ def build_dataloaders(
         "persistent_workers": num_workers > 0,
     }
 
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+    train_loader = DataLoader(train_dataset, shuffle=False, **loader_kwargs)
     val_loader = None
     if val_dataset is not None:
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
@@ -706,7 +710,7 @@ def build_dataloaders(
 
 def print_model_summary(
     model: nn.Module,
-    train_loader: DataLoader,
+    probe_loader: DataLoader,
     device: torch.device,
     *,
     enabled: bool,
@@ -722,7 +726,7 @@ def print_model_summary(
             "Install it via 'pip install torchinfo'."
         ) from exc
 
-    sample_batch = next(iter(train_loader))
+    sample_batch = next(iter(probe_loader))
     sample_batch = {
         key: tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
         for key, tensor in sample_batch.items()
@@ -769,8 +773,10 @@ def configure_trainer(
     log_every: int,
     max_grad_norm: float | None,
     use_amp: bool,
+    checkpoint_path: Path | None,
     show_progress: bool,
     lr_scheduler_name: str | None,
+    freeze_sigma: int,
     profile: bool,
     profile_dir: Path | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
@@ -781,8 +787,10 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         label_smoothing=label_smoothing, 
         use_amp=use_amp,
+        checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
         show_progress=show_progress,
         early_stopping_patience=5,
+        freeze_sigma=freeze_sigma,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
     )
@@ -877,7 +885,6 @@ def main() -> None:
         pool=getattr(args, "pool", 1),
         balance_files=getattr(args, "balance_train_files", False),
         max_events=1,
-        cache_file_handles=False,
         progress=False,
     )
     model = build_model(args, probe_dataset)
@@ -932,7 +939,9 @@ def main() -> None:
         max_grad_norm=args.max_grad_norm,
         use_amp=args.use_amp,
         show_progress=args.progress_bar,
+        checkpoint_path=args.checkpoint,
         lr_scheduler_name=args.lr_scheduler,
+        freeze_sigma=args.freeze_sigma,
         profile=args.profile,
         profile_dir=args.profile_dir,
     )

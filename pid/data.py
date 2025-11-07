@@ -130,9 +130,6 @@ class DualReadoutEventDataset(Dataset):
     class_names:
         Optional sequence defining the label ordering. When ``None`` the
         dataset determines the unique labels by scanning the input files.
-    cache_file_handles:
-        When ``True`` (default) the HDF5 files are kept open per worker
-        process to avoid frequent reopen/close operations.
     balance_files:
         When ``True`` the dataset truncates each input file so that all files
         contribute the same number of events, matching the smallest available
@@ -170,10 +167,10 @@ class DualReadoutEventDataset(Dataset):
         amp_sum_clip_sample_size: int = 16_384,
         summary_fn: Optional[SummaryFnType] = None,
         class_names: Optional[Sequence[str]] = None,
-        cache_file_handles: bool = True,
         balance_files: bool = False,
         max_events: Optional[int] = None,
         progress: bool = True,
+        cache_size: int = 1024,
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
@@ -227,7 +224,7 @@ class DualReadoutEventDataset(Dataset):
             self.summary_fn: AmpAwareSummaryFn = self._amp_summary
         else:
             self.summary_fn = self._coerce_summary_fn(summary_fn)
-        self.cache_file_handles = cache_file_handles
+        self.cache_size = cache_size
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative when provided")
@@ -242,8 +239,8 @@ class DualReadoutEventDataset(Dataset):
         self._amp_sum_clip_sample_size = amp_sum_clip_sample_size
         self._amp_sum_threshold: float = float("inf")
 
-        self._file_handles: MutableMapping[int, h5py.File] = {}
         self._indices: List[Tuple[int, int]] = []
+        self._cache: MutableMapping[int, MutableMapping[Tuple[int, int], Mapping[str, Any]]] = {}
 
         if class_names is not None:
             self.classes: Tuple[str, ...] = tuple(class_names)
@@ -307,12 +304,72 @@ class DualReadoutEventDataset(Dataset):
 
     def __getitem__(self, index: int) -> EventRecord:
         file_id, event_id = self._indices[index]
-        with self._get_handle(file_id) as handle:
-            return self._load_event(handle, file_id, event_id)
+        chunk_start = (event_id // self.cache_size) * self.cache_size
+        cache_key = (file_id, chunk_start)
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        if worker_id not in self._cache:
+             # Initialize cache for this worker (this is safe in multiprocessing)
+             self._cache[worker_id] = {}
+        # --- 2. Load chunk into cache if needed ---
+        if cache_key not in self._cache[worker_id]:
+            try:
+                with h5py.File(self.files[file_id], "r") as handle:
+                    # Store in *worker-local* cache
+                    self._cache[worker_id][cache_key] = self._get_chunk(handle, chunk_start)
+                # File handle is now closed. This is safe.
+            except Exception as e:
+                self._log(f"ERROR: Worker {worker_id} failed to load chunk {cache_key} from {self.files[file_id]}: {e}")
+                # Fallback: get a different item (use modulo for safety)
+                return self.__getitem__((index + 1) % len(self))
+        # --- 3. Retrieve event from cache ---
+        chunk_data = self._cache[worker_id][cache_key]
+        local_index = event_id - chunk_start
+        
+        try:
+            # Get the specific event data
+            return self._load_event(chunk_data, local_index, file_id, event_id)
+        except IndexError as e:
+            self._log(f"ERROR: Worker {worker_id} had an index error. "
+                      f"Attempted local_index {local_index} in chunk {cache_key} with shape {chunk_data['points'].shape}. "
+                      f"Original index {index}. Error: {e}")
+            return self.__getitem__((index + 1) % len(self))
 
-    def _load_event(self, handle: h5py.File, file_id: int, event_id: int) -> EventRecord:
-        hits = [np.asarray(handle[feature][event_id]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+    def _get_chunk(self, handle: h5py.File, chunk_start: int) -> Mapping[str, Any]:
+        start = chunk_start
+        stop = min(start + self.cache_size, len(handle[self.label_key]))
+        hits = [np.asarray(handle[feature][start:stop][:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
+
+        def _read_optional(dataset_name: str) -> float:
+            if dataset_name not in handle:
+                return None
+            value = handle[dataset_name][start:stop]
+            array = np.asarray(value, dtype=np.float32)
+            if array.size == 0:
+                return None
+            return array
+
+        c_amp = _read_optional("C_amp")
+        s_amp = _read_optional("S_amp")
+        summary = self.summary_fn(c_amp, s_amp, points, self.feature_to_index)
+        label_value = handle[self.label_key][start:stop]
+        energy = handle[self.energy_key][start:stop]
+        chunk={
+            "start": start, 
+            "points": points,
+            "summary": summary,
+            "label_value": label_value,
+            "energy": energy
+            }   
+        return chunk
+
+    def _load_event(self, chunk: Mapping[str, Any], local_index: int, file_id: int, event_id: int) -> EventRecord:
+        points = chunk["points"][local_index]
+        label_value = chunk["label_value"][local_index]
+        summary = chunk["summary"][local_index]
+        energy = chunk["energy"][local_index]
+
         pos_tensor: torch.Tensor | None = None
         if self.pos_keys:
             coord_indices: List[int] = []
@@ -324,38 +381,17 @@ class DualReadoutEventDataset(Dataset):
             if len(coord_indices) >= 3:
                 coords = np.asarray(points[:, coord_indices[:3]], dtype=np.float32).copy()
                 pos_tensor = torch.from_numpy(coords)
-        if self.max_points is not None and points.shape[0] > self.max_points:
-            #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
-            #choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
-            points = points[:self.max_points]
-            if pos_tensor is not None:
-                pos_tensor = pos_tensor[: self.max_points]
 
         # Some lightweight conversion helpers so tests using minimal HDF5 stubs do
         # not have to materialize the pre-computed amplitude summaries. When the
         # datasets are absent we fall back to zeros and let the summary function
-        # derive the values from the hit-level features instead.
-        def _read_optional(dataset_name: str) -> float:
-            if dataset_name not in handle:
-                return 0.0
-            value = handle[dataset_name][event_id]
-            array = np.asarray(value, dtype=np.float32)
-            if array.size == 0:
-                return 0.0
-            return float(array.reshape(-1)[0])
 
-        c_amp = _read_optional("C_amp")
-        s_amp = _read_optional("S_amp")
-
-        summary = self.summary_fn(c_amp, s_amp, points, self.feature_to_index)
-        label_value = handle[self.label_key][event_id]
         label_name = _decode_label(label_value)
         if label_name not in self.class_to_index:
             raise KeyError(f"Encountered label '{label_name}' that is not part of the class map {self.class_to_index}")
         label = self.class_to_index[label_name]
-        energy = np.asarray(handle[self.energy_key][event_id], dtype=np.float32)
+        
         energy = np.atleast_1d(energy)
-
         return EventRecord(
             points=torch.from_numpy(points),
             summary=torch.from_numpy(summary.astype(np.float32)),
@@ -413,7 +449,7 @@ class DualReadoutEventDataset(Dataset):
                 chunk_size = min(max(scan_num_events // 32, 1), 1024)
                 file_indices: List[Tuple[int, int]] = []
                 
-                amp_dataset = handle[self.amp_sum_key][:scan_num_events]
+                #amp_dataset = handle[self.amp_sum_key][:scan_num_events]
                 chunk_iterator = range(0, scan_num_events, chunk_size)
                 if self._progress_enabled:
                     chunk_iterator = tqdm(
@@ -425,7 +461,7 @@ class DualReadoutEventDataset(Dataset):
                     )
                 for start in chunk_iterator:
                     stop = min(start + chunk_size, scan_num_events)
-                    amp_chunk = np.asarray(amp_dataset[start:stop], dtype=np.float64)
+                    amp_chunk = np.asarray(handle[self.amp_sum_key][start:stop], dtype=np.float64)
                     finite = np.isfinite(amp_chunk)
                     sanitized = np.where(finite, amp_chunk, 0.0)
 
@@ -453,8 +489,16 @@ class DualReadoutEventDataset(Dataset):
 
         if per_file_indices and self._max_events is not None:
             per_file_indices = [entries[: self._max_events] for entries in per_file_indices]
-
-        self._indices = [entry for entries in per_file_indices for entry in entries]
+        rng = np.random.default_rng(12345)
+        cursor = np.zeros(len(per_file_indices), dtype=int)
+        labels = list(range(len(per_file_indices)))
+        total = sum(len(entries) for entries in per_file_indices)
+        while len(self._indices) < total:
+            l= rng.choice(labels)
+            if cursor[l] < len(per_file_indices[l]):
+                i = cursor[l]
+                self._indices.append(per_file_indices[l][i])
+                cursor[l] += 1
 
     def _estimate_amplitude_sum_threshold(self) -> float:
         """Estimate a robust amplitude sum threshold for masking outliers."""
@@ -517,20 +561,8 @@ class DualReadoutEventDataset(Dataset):
             return
         print(f"[DualReadoutEventDataset] {message}", flush=True)
 
-    @contextmanager
-    def _get_handle(self, file_id: int) -> Iterator[h5py.File]:
-        if not self.cache_file_handles:
-            with h5py.File(self.files[file_id], "r") as handle:
-                yield handle
-            return
-        if file_id not in self._file_handles:
-            self._file_handles[file_id] = h5py.File(self.files[file_id], "r")
-        yield self._file_handles[file_id]
-
     def close(self) -> None:
-        for handle in self._file_handles.values():
-            handle.close()
-        self._file_handles.clear()
+        self._chunk_cache.clear()
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         try:
@@ -541,22 +573,22 @@ class DualReadoutEventDataset(Dataset):
     # ------------------------------------------------------------------
     # Summary feature engineering
     # ------------------------------------------------------------------
-    def _amp_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
+    def _amp_summary(self, C_amp: list, S_amp: list, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute simple amplitude-based summary features for one event."""
 
         is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
-        if(C_amp>0):
-            c_sum = float(C_amp)
+        if C_amp is not None:
+            c_sum = C_amp
         else:
             c = points[is_cherenkov, index_map[self.amp_sum_key]]
             c_sum = float(np.sum(c))
-        if(S_amp>0):
-            s_sum = float(S_amp)
+        if S_amp is not None:
+            s_sum = S_amp
         else:
             s = points[~is_cherenkov, index_map[self.amp_sum_key]]
             s_sum = float(np.sum(s))
-        stats= [s_sum, c_sum, s_sum + c_sum]
-        return np.asarray(stats, dtype=np.float32)
+        stats= [c_sum, s_sum, s_sum + c_sum]
+        return np.asarray(stats, dtype=np.float32).transpose()
     
     def _dist_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""

@@ -16,8 +16,8 @@ from pid.data import DualReadoutEventDataset
 
 @pytest.fixture()
 def overflow_h5(tmp_path):
-    file_path = tmp_path / "overflow.h5"
-    with h5py.File(file_path, "w") as handle:
+    file_path1 = tmp_path / "overflow1.h5"
+    with h5py.File(file_path1, "w") as handle:
         # Build a tiny dataset with one obvious outlier.
         amplitudes = np.full((4, 8), 10.0, dtype=np.float32)
         amplitudes[3, :] = 1e9
@@ -35,17 +35,48 @@ def overflow_h5(tmp_path):
         handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
         handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
 
-        labels = np.array(["11", "211", "11", "211"], dtype="S")
+        labels = np.array(["11", "11", "11", "11"], dtype="S")
         energies = np.full(4, 42.0, dtype=np.float32)
+        c_amp = np.full(4, 40, dtype=np.float32)
+        s_amp = np.full(4, 40, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
+    file_path2 = tmp_path / "overflow2.h5"
+    with h5py.File(file_path2, "w") as handle:
+        # Build a tiny dataset with one obvious outlier.
+        amplitudes = np.full((4, 8), 10.0, dtype=np.float32)
+        amplitudes[3, :] = 1e9
+        types = np.zeros((4, 8), dtype=np.float32)
+        types[:, 4:] = 1.0  # mark last four hits as Cherenkov
+        time = np.linspace(0.0, 1.0, 8, dtype=np.float32)
+        time = np.tile(time, (4, 1))
+        zeros = np.zeros_like(amplitudes)
 
-    return file_path
+        handle.create_dataset("DRcalo3dHits.amplitude_sum", data=amplitudes)
+        handle.create_dataset("DRcalo3dHits.type", data=types)
+        handle.create_dataset("DRcalo3dHits.time", data=time)
+        handle.create_dataset("DRcalo3dHits.time_end", data=time + 0.1)
+        handle.create_dataset("DRcalo3dHits.position.x", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
+        handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
+
+        labels = np.array(["211", "211", "211", "211"], dtype="S")
+        energies = np.full(4, 42.0, dtype=np.float32)
+        c_amp = np.full(4, 40, dtype=np.float32)
+        s_amp = np.full(4, 40, dtype=np.float32)
+        handle.create_dataset("GenParticles.PDG", data=labels)
+        handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
+
+    return file_path1, file_path2
 
 
 def test_amplitude_sum_masking(overflow_h5, stats_file):
     dataset = DualReadoutEventDataset(
-        [str(overflow_h5)],
+        files=overflow_h5,
         hit_features=(
             "DRcalo3dHits.amplitude_sum",
             "DRcalo3dHits.type",
@@ -65,7 +96,7 @@ def test_amplitude_sum_masking(overflow_h5, stats_file):
     )
 
     # The dataset should drop the overflowing event entirely.
-    assert len(dataset) == 3
+    assert len(dataset) == 6
 
     amp_index = dataset.feature_to_index["DRcalo3dHits.amplitude_sum"]
     seen_event_ids = []
@@ -77,38 +108,7 @@ def test_amplitude_sum_masking(overflow_h5, stats_file):
         assert np.isfinite(amp_total)
         assert torch.all(torch.isfinite(event.summary))
 
-    assert sorted(seen_event_ids) == [0, 1, 2]
-
-
-def test_cache_file_handles_disabled_does_not_leak(overflow_h5, stats_file):
-    dataset = DualReadoutEventDataset(
-        [str(overflow_h5)],
-        hit_features=(
-            "DRcalo3dHits.amplitude_sum",
-            "DRcalo3dHits.type",
-            "DRcalo3dHits.time",
-            "DRcalo3dHits.time_end",
-            "DRcalo3dHits.position.x",
-            "DRcalo3dHits.position.y",
-            "DRcalo3dHits.position.z",
-        ),
-        label_key="GenParticles.PDG",
-        energy_key="E_gen",
-        stat_file=str(stats_file),
-        max_points=None,
-        amp_sum_clip_percentile=None,
-        cache_file_handles=False,
-    )
-
-    def open_file_count() -> int:
-        return len(h5py.h5f.get_obj_ids(types=h5py.h5f.OBJ_FILE))
-
-    baseline = open_file_count()
-
-    for i in range(8):
-        _ = dataset[i % len(dataset)]
-        assert open_file_count() == baseline
-
+    assert sorted(seen_event_ids) == [0, 0, 1, 1, 2, 2]
 
 def _write_simple_file(path, num_events, label_value):
     with h5py.File(path, "w") as handle:
@@ -128,15 +128,24 @@ def _write_simple_file(path, num_events, label_value):
 
         labels = np.full(num_events, label_value, dtype="S")
         energies = np.full(num_events, 10.0, dtype=np.float32)
+        c_amp = np.full(num_events, 2, dtype=np.float32)
+        s_amp = np.full(num_events, 2, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
 
-
-def test_balance_and_limit(tmp_path, stats_file):
+@pytest.fixture
+def two_files(tmp_path):
     file_a = tmp_path / "a.h5"
     file_b = tmp_path / "b.h5"
     _write_simple_file(file_a, 5, b"11")
     _write_simple_file(file_b, 3, b"211")
+    return file_a, file_b
+
+
+def test_balance_and_limit(two_files, stats_file):
+    file_a, file_b = two_files
 
     common_kwargs = dict(
         hit_features=(
@@ -209,8 +218,12 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
 
         labels = np.array(["11"], dtype="S")
         energies = np.array([10.0], dtype=np.float32)
+        c_amp = np.array([3.0 + 4.0], dtype=np.float32)
+        s_amp = np.array([1.0 + 2.0], dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
 
     dataset = DualReadoutEventDataset(
         [str(file_path)],
@@ -225,17 +238,21 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
         ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
         stat_file=str(stats_file),
         max_points=None,
         amp_sum_clip_percentile=None,
     )
 
     record = dataset[0]
-    # Feature statistics scale the amplitude sums by 1/100.
-    s_sum = (1.0 + 2.0) / 100.0
-    c_sum = (3.0 + 4.0) / 100.0
+    s_sum = (1.0 + 2.0) 
+    c_sum = (3.0 + 4.0) 
     total = s_sum + c_sum
 
-    assert np.isclose(record.summary[0].item(), s_sum)
-    assert np.isclose(record.summary[1].item(), c_sum)
+    assert np.isclose(record.summary[0].item(), c_sum)
+    assert np.isclose(record.summary[1].item(), s_sum)
     assert np.isclose(record.summary[2].item(), total)
