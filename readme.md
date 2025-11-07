@@ -11,9 +11,12 @@ Mamba-inspired networks) on both simulated and test-beam data.
 | Module | Description |
 | --- | --- |
 | `pid.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
-| `pid.models.mlp.SummaryMLP` | Simple baseline operating on engineered S/C summary statistics. |
-| `pid.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with multi-task (PID + energy) head. |
-| `pid.models.pointset_transformer.PointSetTransformer` | Transformer encoder for masked point sets with global pooling head. |
+| `pid.models.mlp.SummaryMLP` | Simple baseline operating on engineered scintillation/Cherenkov summary statistics. |
+| `pid.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with shared backbone and multi-task (PID + energy) head. |
+| `pid.models.pointset_mlppp.PointSetMLPpp` | Deeper PointMLP++-style network with adaptive feature normalization and optional geometric modulation. |
+| `pid.models.poinset_graph.PointSetGraphNet` | DGCNN-inspired graph network with static/dynamic kNN message passing over hit coordinates. |
+| `pid.models.pointset_transformer.PointSetTransformer` | Global transformer encoder for masked point sets with summary-aware pooling head. |
+| `pid.models.pointset_ptv3.PointSetTransformerV3` | Point Transformer v3 style local-attention encoder requiring per-hit coordinates. |
 | `pid.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
 | `pid.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
 
@@ -57,7 +60,15 @@ from pid.data import DualReadoutEventDataset, collate_events
 
 dataset = DualReadoutEventDataset(
     files=["/path/to/electrons.h5", "/path/to/pions.h5"],
-    hit_features=("x", "y", "z", "S", "C", "t"),
+    hit_features=(
+        "DRcalo3dHits.amplitude_sum",
+        "DRcalo3dHits.type",
+        "DRcalo3dHits.time",
+        "DRcalo3dHits.time_end",
+        "DRcalo3dHits.position.x",
+        "DRcalo3dHits.position.y",
+        "DRcalo3dHits.position.z",
+    ),
     label_key="particle_type",
     energy_key="true_energy",
     stat_file="/path/to/stats.yaml",
@@ -66,6 +77,12 @@ dataset = DualReadoutEventDataset(
 
 loader = DataLoader(dataset, batch_size=32, collate_fn=collate_events, shuffle=True)
 ```
+
+The feature list above mirrors the defaults exposed by the command-line
+interface in `run.py`, giving you the total amplitude, channel type,
+timing window and 3D coordinates for each hit. You can extend or
+reorder the tuple to match the contents of your HDF5 files as long as
+the accompanying statistics file contains matching entries.
 
 ### 4. Instantiate a model and trainer
 
@@ -156,6 +173,3 @@ regressions.
 └── toh5.py                    # ROOT → HDF5 converter used during data preparation
 ```
 
-## License
-
-See `LICENSE` for licensing information.
