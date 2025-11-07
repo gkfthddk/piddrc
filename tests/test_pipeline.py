@@ -190,7 +190,7 @@ def test_instance_name_sets_default_artifact_paths(dummy_h5, monkeypatch):
 
     args = run.parse_args([
         "--train_files",
-        dummy_h5,
+        ",".join(dummy_h5),
         "--name",
         "experiment_a",
     ])
