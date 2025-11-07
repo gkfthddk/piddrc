@@ -37,8 +37,12 @@ def overflow_h5(tmp_path):
 
         labels = np.array(["11", "211", "11", "211"], dtype="S")
         energies = np.full(4, 42.0, dtype=np.float32)
+        c_amp = np.full(4, 300, dtype=np.float32)
+        s_amp = np.full(4, 6000, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
 
     return file_path
 
@@ -128,8 +132,12 @@ def _write_simple_file(path, num_events, label_value):
 
         labels = np.full(num_events, label_value, dtype="S")
         energies = np.full(num_events, 10.0, dtype=np.float32)
+        c_amp = np.full(num_events, 300, dtype=np.float32)
+        s_amp = np.full(num_events, 6000, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
 
 def write_two_file(tmp_path):
     file_a = tmp_path / "a.h5"
@@ -213,10 +221,14 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
         handle.create_dataset("DRcalo3dHits.position.y", data=zeros)
         handle.create_dataset("DRcalo3dHits.position.z", data=zeros)
 
-        labels = np.array(["11","211"], dtype="S")
+        labels = np.array(["11"], dtype="S")
         energies = np.array([10.0], dtype=np.float32)
+        c_amp = np.array([300], dtype=np.float32)
+        s_amp = np.array([6000], dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
+        handle.create_dataset("C_amp", data=c_amp)
+        handle.create_dataset("S_amp", data=s_amp)
 
     dataset = DualReadoutEventDataset(
         [str(file_path)],
@@ -231,6 +243,11 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
         ),
         label_key="GenParticles.PDG",
         energy_key="E_gen",
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
         stat_file=str(stats_file),
         max_points=None,
         amp_sum_clip_percentile=None,

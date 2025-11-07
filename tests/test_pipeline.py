@@ -52,6 +52,10 @@ def dummy_h5(tmp_path):
             f.create_dataset(feature, data=data)
         labels = np.array(["11", "211"] * 4, dtype="S")
         energies = rng.uniform(5, 50, size=8).astype(np.float32)
+        c_amp = rng.uniform(100, 500, size=8).astype(np.float32)
+        s_amp = rng.uniform(2000, 8000, size=8).astype(np.float32)
+        f.create_dataset("C_amp", data=c_amp)
+        f.create_dataset("S_amp", data=s_amp)
         f.create_dataset("GenParticles.PDG", data=labels)
         f.create_dataset("E_gen", data=energies)
     return file_path
