@@ -37,8 +37,8 @@ def overflow_h5(tmp_path):
 
         labels = np.array(["11", "11", "11", "11"], dtype="S")
         energies = np.full(4, 42.0, dtype=np.float32)
-        c_amp = np.full(4, 300, dtype=np.float32)
-        s_amp = np.full(4, 6000, dtype=np.float32)
+        c_amp = np.full(4, 40, dtype=np.float32)
+        s_amp = np.full(4, 40, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
         handle.create_dataset("C_amp", data=c_amp)
@@ -64,8 +64,8 @@ def overflow_h5(tmp_path):
 
         labels = np.array(["211", "211", "211", "211"], dtype="S")
         energies = np.full(4, 42.0, dtype=np.float32)
-        c_amp = np.full(4, 300, dtype=np.float32)
-        s_amp = np.full(4, 6000, dtype=np.float32)
+        c_amp = np.full(4, 40, dtype=np.float32)
+        s_amp = np.full(4, 40, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
         handle.create_dataset("C_amp", data=c_amp)
@@ -128,8 +128,8 @@ def _write_simple_file(path, num_events, label_value):
 
         labels = np.full(num_events, label_value, dtype="S")
         energies = np.full(num_events, 10.0, dtype=np.float32)
-        c_amp = np.full(num_events, 300, dtype=np.float32)
-        s_amp = np.full(num_events, 6000, dtype=np.float32)
+        c_amp = np.full(num_events, 2, dtype=np.float32)
+        s_amp = np.full(num_events, 2, dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
         handle.create_dataset("C_amp", data=c_amp)
@@ -218,8 +218,8 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
 
         labels = np.array(["11"], dtype="S")
         energies = np.array([10.0], dtype=np.float32)
-        c_amp = np.array([300], dtype=np.float32)
-        s_amp = np.array([6000], dtype=np.float32)
+        c_amp = np.array([3.0 + 4.0], dtype=np.float32)
+        s_amp = np.array([1.0 + 2.0], dtype=np.float32)
         handle.create_dataset("GenParticles.PDG", data=labels)
         handle.create_dataset("E_gen", data=energies)
         handle.create_dataset("C_amp", data=c_amp)
@@ -254,6 +254,6 @@ def test_missing_summary_datasets_fall_back_to_hits(tmp_path, stats_file):
     c_sum = (3.0 + 4.0) / 100.0
     total = s_sum + c_sum
 
-    assert np.isclose(record.summary[0].item(), s_sum)
-    assert np.isclose(record.summary[1].item(), c_sum)
+    assert np.isclose(record.summary[0].item(), c_sum)
+    assert np.isclose(record.summary[1].item(), s_sum)
     assert np.isclose(record.summary[2].item(), total)

@@ -587,7 +587,7 @@ class DualReadoutEventDataset(Dataset):
         else:
             s = points[~is_cherenkov, index_map[self.amp_sum_key]]
             s_sum = float(np.sum(s))
-        stats= [s_sum, c_sum, s_sum + c_sum]
+        stats= [c_sum, s_sum, s_sum + c_sum]
         return np.asarray(stats, dtype=np.float32).transpose()
     
     def _dist_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
