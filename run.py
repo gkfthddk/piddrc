@@ -881,7 +881,6 @@ def main() -> None:
         pool=getattr(args, "pool", 1),
         balance_files=getattr(args, "balance_train_files", False),
         max_events=1,
-        cache_file_handles=False,
         progress=False,
     )
     model = build_model(args, probe_dataset)

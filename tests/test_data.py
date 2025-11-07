@@ -16,7 +16,7 @@ from pid.data import DualReadoutEventDataset
 
 @pytest.fixture()
 def overflow_h5(tmp_path):
-    file_path1 = tmp_path / "overflow2.h5"
+    file_path1 = tmp_path / "overflow1.h5"
     with h5py.File(file_path1, "w") as handle:
         # Build a tiny dataset with one obvious outlier.
         amplitudes = np.full((4, 8), 10.0, dtype=np.float32)
@@ -74,9 +74,9 @@ def overflow_h5(tmp_path):
     return file_path1, file_path2
 
 
-def test_amplitude_sum_masking(write_two_file, stats_file):
+def test_amplitude_sum_masking(overflow_h5, stats_file):
     dataset = DualReadoutEventDataset(
-        [write_two_file],
+        files=overflow_h5,
         hit_features=(
             "DRcalo3dHits.amplitude_sum",
             "DRcalo3dHits.type",
@@ -96,7 +96,7 @@ def test_amplitude_sum_masking(write_two_file, stats_file):
     )
 
     # The dataset should drop the overflowing event entirely.
-    assert len(dataset) == 3
+    assert len(dataset) == 6
 
     amp_index = dataset.feature_to_index["DRcalo3dHits.amplitude_sum"]
     seen_event_ids = []
@@ -108,12 +108,12 @@ def test_amplitude_sum_masking(write_two_file, stats_file):
         assert np.isfinite(amp_total)
         assert torch.all(torch.isfinite(event.summary))
 
-    assert sorted(seen_event_ids) == [0, 1, 2]
+    assert sorted(seen_event_ids) == [0, 0, 1, 1, 2, 2]
 
 
-def test_cache_file_handles_disabled_does_not_leak(write_two_file, stats_file):
+def test_cache_file_handles_disabled_does_not_leak(overflow_h5, stats_file):
     dataset = DualReadoutEventDataset(
-        [overflow_h5],
+        files=overflow_h5,
         hit_features=(
             "DRcalo3dHits.amplitude_sum",
             "DRcalo3dHits.type",
@@ -166,18 +166,17 @@ def _write_simple_file(path, num_events, label_value):
         handle.create_dataset("C_amp", data=c_amp)
         handle.create_dataset("S_amp", data=s_amp)
 
-def write_two_file(tmp_path):
+@pytest.fixture
+def two_files(tmp_path):
     file_a = tmp_path / "a.h5"
     file_b = tmp_path / "b.h5"
     _write_simple_file(file_a, 5, b"11")
     _write_simple_file(file_b, 3, b"211")
     return file_a, file_b
 
-def test_balance_and_limit(tmp_path, stats_file):
-    file_a = tmp_path / "a.h5"
-    file_b = tmp_path / "b.h5"
-    _write_simple_file(file_a, 5, b"11")
-    _write_simple_file(file_b, 3, b"211")
+
+def test_balance_and_limit(two_files, stats_file):
+    file_a, file_b = two_files
 
     common_kwargs = dict(
         hit_features=(

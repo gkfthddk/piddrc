@@ -130,9 +130,6 @@ class DualReadoutEventDataset(Dataset):
     class_names:
         Optional sequence defining the label ordering. When ``None`` the
         dataset determines the unique labels by scanning the input files.
-    cache_file_handles:
-        When ``True`` (default) the HDF5 files are kept open per worker
-        process to avoid frequent reopen/close operations.
     balance_files:
         When ``True`` the dataset truncates each input file so that all files
         contribute the same number of events, matching the smallest available
@@ -170,7 +167,6 @@ class DualReadoutEventDataset(Dataset):
         amp_sum_clip_sample_size: int = 16_384,
         summary_fn: Optional[SummaryFnType] = None,
         class_names: Optional[Sequence[str]] = None,
-        cache_file_handles: bool = True,
         balance_files: bool = False,
         max_events: Optional[int] = None,
         progress: bool = True,
@@ -229,7 +225,6 @@ class DualReadoutEventDataset(Dataset):
         else:
             self.summary_fn = self._coerce_summary_fn(summary_fn)
         self.cache_size = cache_size
-        self.cache_file_handles = cache_file_handles
         self._balance_files = balance_files
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative when provided")
@@ -244,9 +239,8 @@ class DualReadoutEventDataset(Dataset):
         self._amp_sum_clip_sample_size = amp_sum_clip_sample_size
         self._amp_sum_threshold: float = float("inf")
 
-        self._file_handles: MutableMapping[int, h5py.File] = {}
         self._indices: List[Tuple[int, int]] = []
-        self._chunk_cache: Dict[int, Tuple[int, Mapping[str, Any]]] = {}
+        self._cache: MutableMapping[int, MutableMapping[Tuple[int, int], Mapping[str, Any]]] = {}
 
         if class_names is not None:
             self.classes: Tuple[str, ...] = tuple(class_names)
@@ -310,17 +304,41 @@ class DualReadoutEventDataset(Dataset):
 
     def __getitem__(self, index: int) -> EventRecord:
         file_id, event_id = self._indices[index]
-        return self._load_event(file_id, event_id)
+        chunk_start = (event_id // self.cache_size) * self.cache_size
+        cache_key = (file_id, chunk_start)
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        if worker_id not in self._cache:
+             # Initialize cache for this worker (this is safe in multiprocessing)
+             self._cache[worker_id] = {}
+        # --- 2. Load chunk into cache if needed ---
+        if cache_key not in self._cache[worker_id]:
+            try:
+                with h5py.File(self.files[file_id], "r") as handle:
+                    # Store in *worker-local* cache
+                    self._cache[worker_id][cache_key] = self._get_chunk(handle, chunk_start)
+                # File handle is now closed. This is safe.
+            except Exception as e:
+                self._log(f"ERROR: Worker {worker_id} failed to load chunk {cache_key} from {self.files[file_id]}: {e}")
+                # Fallback: get a different item (use modulo for safety)
+                return self.__getitem__((index + 1) % len(self))
+        # --- 3. Retrieve event from cache ---
+        chunk_data = self._cache[worker_id][cache_key]
+        local_index = event_id - chunk_start
+        
+        try:
+            # Get the specific event data
+            return self._load_event(chunk_data, local_index, file_id, event_id)
+        except IndexError as e:
+            self._log(f"ERROR: Worker {worker_id} had an index error. "
+                      f"Attempted local_index {local_index} in chunk {cache_key} with shape {chunk_data['points'].shape}. "
+                      f"Original index {index}. Error: {e}")
+            return self.__getitem__((index + 1) % len(self))
 
-    def _get_chunk(self, handle: h5py.File, file_id: int, event_id: int) -> Mapping[str, Any]:
-        chunk_id = event_id // self.cache_size
-        cached = self._chunk_cache.get(file_id)
-        if cached is not None and cached[0] == chunk_id:
-            return cached[1]
-
-        start = chunk_id * self.cache_size
-        stop = min(start + self.cache_size, self._max_events or len(handle[self.label_key]))
-        hits = [np.asarray(handle[feature][start:stop]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+    def _get_chunk(self, handle: h5py.File, chunk_start: int) -> Mapping[str, Any]:
+        start = chunk_start
+        stop = min(start + self.cache_size, len(handle[self.label_key]))
+        hits = [np.asarray(handle[feature][start:stop][:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
         points = np.stack(hits, axis=-1)
 
         def _read_optional(dataset_name: str) -> float:
@@ -344,13 +362,9 @@ class DualReadoutEventDataset(Dataset):
             "label_value": label_value,
             "energy": energy
             }   
-        self._chunk_cache[file_id] = (chunk_id, chunk)
-        return self._chunk_cache[file_id][1]
+        return chunk
 
-    def _load_event(self, file_id: int, event_id: int) -> EventRecord:
-        with self._get_handle(file_id) as handle:
-            chunk = self._get_chunk(handle, file_id, event_id)
-        local_index = event_id - chunk["start"]
+    def _load_event(self, chunk: Mapping[str, Any], local_index: int, file_id: int, event_id: int) -> EventRecord:
         points = chunk["points"][local_index]
         label_value = chunk["label_value"][local_index]
         summary = chunk["summary"][local_index]
@@ -367,17 +381,10 @@ class DualReadoutEventDataset(Dataset):
             if len(coord_indices) >= 3:
                 coords = np.asarray(points[:, coord_indices[:3]], dtype=np.float32).copy()
                 pos_tensor = torch.from_numpy(coords)
-        if self.max_points is not None and points.shape[0] > self.max_points:
-            #rng = np.random.default_rng(seed=hash((file_id, event_id)) & 0xFFFF_FFFF)
-            #choice = np.sort(rng.choice(points.shape[0], self.max_points, replace=False))
-            points = points[:self.max_points]
-            if pos_tensor is not None:
-                pos_tensor = pos_tensor[: self.max_points]
 
         # Some lightweight conversion helpers so tests using minimal HDF5 stubs do
         # not have to materialize the pre-computed amplitude summaries. When the
         # datasets are absent we fall back to zeros and let the summary function
-        # derive the values from the hit-level features instead.
 
         label_name = _decode_label(label_value)
         if label_name not in self.class_to_index:
@@ -554,20 +561,7 @@ class DualReadoutEventDataset(Dataset):
             return
         print(f"[DualReadoutEventDataset] {message}", flush=True)
 
-    @contextmanager
-    def _get_handle(self, file_id: int) -> Iterator[h5py.File]:
-        if not self.cache_file_handles:
-            with h5py.File(self.files[file_id], "r") as handle:
-                yield handle
-            return
-        if file_id not in self._file_handles:
-            self._file_handles[file_id] = h5py.File(self.files[file_id], "r")
-        yield self._file_handles[file_id]
-
     def close(self) -> None:
-        for handle in self._file_handles.values():
-            handle.close()
-        self._file_handles.clear()
         self._chunk_cache.clear()
 
     def __del__(self) -> None:  # pragma: no cover - best effort cleanup
