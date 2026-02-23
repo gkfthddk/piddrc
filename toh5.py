@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Any
 
 # --- Global Constants and Configuration ---
-VERSION = "version16"
+VERSION = "version18"
 DEFAULT_STATS_PERCENTILES = (0.5, 0.9, 0.99)
+POOL_SET=[]
+#POOL_SET=[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 28, 56]
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,10 +33,10 @@ def print_memory_usage(tag: str = "", pid: Optional[int] = None) -> None:
     logger.info(f"{tag} [PID {process.pid}] Memory usage: {mem:.2f} MB")
 
 class StreamingStats:
-    """Keep track of aggregate statistics for a channel."""
+    """Keeps running aggregate statistics and a reservoir sample for percentiles."""
 
     def __init__(self, sample_size: int, percentiles: Sequence[float]):
-        self.sample_size = sample_size
+        self.sample_size = max(sample_size, 0)
         self.percentiles = percentiles
         self.count: int = 0
         self.sum: float = 0.0
@@ -43,23 +45,41 @@ class StreamingStats:
         self.max_val: float = -math.inf
         self._sample: List[float] = []
 
-    def compute(self, values: np.ndarray) -> Dict[str, Any]:
+    def update(self, values: np.ndarray) -> None:
+        """Update aggregates and maintain a reservoir sample from the provided chunk."""
         if values.size == 0:
             return
 
-        # Promote to float64 for numerical stability.
         flat = values.astype(np.float64, copy=False).ravel()
-        start_count = self.count
+        previous_count = self.count
         self.count += flat.size
         self.sum += float(np.sum(flat))
         self.sumsq += float(np.sum(flat * flat))
         self.min_val = min(self.min_val, float(np.min(flat)))
         self.max_val = max(self.max_val, float(np.max(flat)))
 
-        if self.sample_size <= 0 or flat.size == 0:
+        if self.sample_size <= 0:
+            return
+
+        # Reservoir sampling to keep an unbiased sample for percentile estimation.
+        for idx, value in enumerate(flat):
+            global_index = previous_count + idx
+            if len(self._sample) < self.sample_size:
+                self._sample.append(float(value))
+            else:
+                replace_position = random.randint(0, global_index)
+                if replace_position < self.sample_size:
+                    self._sample[replace_position] = float(value)
+
+    def finalize(self) -> Dict[str, Any]:
+        """Return the current statistics snapshot."""
+        if self.count == 0:
             return {
-                "count": 0, "min": math.nan, "max": math.nan,
-                "mean": math.nan, "std": math.nan,
+                "count": 0,
+                "min": math.nan,
+                "max": math.nan,
+                "mean": math.nan,
+                "std": math.nan,
                 "percentiles": {p: math.nan for p in self.percentiles},
             }
 
@@ -67,10 +87,23 @@ class StreamingStats:
         variance = max(self.sumsq / self.count - mean * mean, 0.0)
         std = math.sqrt(variance)
 
-        percentile_values: Dict[float, float]
-        percentile_values = {p: float(np.quantile(flat, p, method="linear")) for p in self.percentiles}
+        if self.sample_size > 0 and self._sample:
+            sample_array = np.array(self._sample, dtype=np.float64)
+            percentile_values = {
+                p: float(np.quantile(sample_array, p, method="linear"))
+                for p in self.percentiles
+            }
+        else:
+            percentile_values = {p: math.nan for p in self.percentiles}
 
-        return {"count": int(self.count), "min": float(self.min_val), "max": float(self.max_val), "mean": float(mean), "std": float(std), "percentiles": percentile_values}
+        return {
+            "count": int(self.count),
+            "min": float(self.min_val),
+            "max": float(self.max_val),
+            "mean": float(mean),
+            "std": float(std),
+            "percentiles": percentile_values,
+        }
 
 class H5FileProcessor:
     """
@@ -132,7 +165,7 @@ class H5FileProcessor:
     def _build_write_keys(self) -> List[str]:
         """Generates the list of all dataset keys to be written."""
         keys = list(self._BASE_CHANNELS) # Start with a copy of base channels
-        for pool in [4, 7, 8, 14, 28, 56]:
+        for pool in POOL_SET:
             for template in self._POOL_CHANNEL_TEMPLATES:
                 keys.append(template.format(pool=pool))
         return keys
@@ -239,16 +272,14 @@ class H5FileProcessor:
                                 chunks=True,
                                 compression='lzf'
                             )
+                        if self.compute_stats and dataset_name in stats_calculators:
+                            stats_calculators[dataset_name].update(data_chunk)
                     del data_dict # Free memory
                     gc.collect() # Explicit garbage collection
 
-        if self.compute_stats:
-            with h5py.File(output_file, 'r') as f_out:
-                sample_size=self.stats_kwargs["sample_size"]
-                # Update stats before writing
-                for dataset_name in tqdm.tqdm(list(f_out.keys()),desc="Computing stats"):
-                    if dataset_name in stats_calculators:
-                         stats_dict_proxy[dataset_name]=stats_calculators[dataset_name].compute(f_out[dataset_name][:sample_size])
+        if self.compute_stats and stats_dict_proxy is not None:
+            for dataset_name, calculator in stats_calculators.items():
+                stats_dict_proxy[dataset_name] = calculator.finalize()
 
         logger.info(f"Writer worker finished for {output_file}")
         print_memory_usage('Writer end')
@@ -394,7 +425,7 @@ def main():
 
     for pid in pids:
         # for en in ["10","20","50","100"]:
-        for en in ["1-100"]:
+        for en in ["1-120"]:
             for timing_size in [1]: # Renamed 'pool' to 'pool_size' to avoid confusion with multiprocessing pool
                 if timing_size == 1:
                     sample_name = f"{pid}_{en}GeV"

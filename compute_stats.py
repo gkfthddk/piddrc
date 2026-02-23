@@ -10,6 +10,7 @@ discover them from the input files.
 from __future__ import annotations
 
 import argparse
+import random
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 
 import h5py
 import numpy as np
+from typing import List as TypingList
 
 try:  # pragma: no cover - optional dependency
     import yaml
@@ -37,11 +39,12 @@ DEFAULT_SAMPLE_SIZE = 20_000
 DEFAULT_PERCENTILES = (0.5, 0.9, 0.99)
 DEFAULT_DIR = "h5s"
 DEFAULT_FILES = (
-    "e-_1-100GeV",
-    "gamma_1-100GeV",
-    "pi0_1-100GeV",
-    "pi+_1-100GeV",
+    "e-_1-100GeV_1",
+    "gamma_1-100GeV_1",
+    "pi0_1-100GeV_1",
+    "pi+_1-100GeV_1",
 )
+CHUNK_ROWS = 2048
 
 _BASE_CHANNELS = [
     "C_amp",
@@ -105,7 +108,7 @@ _POOL_CHANNEL_TEMPLATES = (
     "DRcalo2dHits{pool}.position.z",
     "DRcalo2dHits{pool}.type",
 )
-POOLSET=[4,5,6,7,8,9,10,11,12,13,14,28,56]
+POOLSET=[4,5,6,7,8,9,10,11,12,13,14,16,28,56]
 def _build_write_keys() -> List[str]:
     """Generates the list of all dataset keys to be written."""
     keys = list(_BASE_CHANNELS)  # Start with a copy of base channels
@@ -115,6 +118,78 @@ def _build_write_keys() -> List[str]:
     return keys
 
 DEFAULT_DATASETS = _build_write_keys()
+
+
+class StreamingStats:
+    """Keeps running aggregates and a bounded reservoir sample for percentiles."""
+
+    def __init__(self, sample_size: int, percentiles: Sequence[float]):
+        self.sample_size = max(sample_size, 0)
+        self.percentiles = percentiles
+        self.count: int = 0
+        self.sum: float = 0.0
+        self.sumsq: float = 0.0
+        self.min_val: float = math.inf
+        self.max_val: float = -math.inf
+        self._sample: TypingList[float] = []
+
+    def update(self, values: np.ndarray) -> None:
+        if values.size == 0:
+            return
+
+        flat = np.asarray(values, dtype=np.float64).ravel()
+        start_count = self.count
+        self.count += flat.size
+        self.sum += float(np.sum(flat))
+        self.sumsq += float(np.sum(flat * flat))
+        self.min_val = min(self.min_val, float(np.min(flat)))
+        self.max_val = max(self.max_val, float(np.max(flat)))
+
+        if self.sample_size <= 0:
+            return
+
+        # Reservoir sampling to keep an unbiased subset for percentile estimation.
+        for idx, value in enumerate(flat):
+            global_index = start_count + idx
+            if len(self._sample) < self.sample_size:
+                self._sample.append(float(value))
+            else:
+                replace_position = random.randint(0, global_index)
+                if replace_position < self.sample_size:
+                    self._sample[replace_position] = float(value)
+
+    def finalize(self) -> Dict[str, Any]:
+        if self.count == 0:
+            return {
+                "count": 0,
+                "min": math.nan,
+                "max": math.nan,
+                "mean": math.nan,
+                "std": math.nan,
+                "percentiles": {p: math.nan for p in self.percentiles},
+            }
+
+        mean = self.sum / self.count
+        variance = max(self.sumsq / self.count - mean * mean, 0.0)
+        std = math.sqrt(variance)
+
+        if self.sample_size > 0 and self._sample:
+            sample_array = np.array(self._sample, dtype=np.float64)
+            percentile_values = {
+                p: float(np.quantile(sample_array, p, method="linear"))
+                for p in self.percentiles
+            }
+        else:
+            percentile_values = {p: math.nan for p in self.percentiles}
+
+        return {
+            "count": int(self.count),
+            "min": float(self.min_val),
+            "max": float(self.max_val),
+            "mean": float(mean),
+            "std": float(std),
+            "percentiles": percentile_values,
+        }
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -176,7 +251,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="h5s/stats_1-100GeV.yaml",
+        default="h5s/stats_1-100GeV_1.yaml",
         help=(
             "Optional path where the statistics will be written.  The format is "
             "chosen by file extension (.json or .yml/.yaml).  If omitted, the "
@@ -217,33 +292,80 @@ def compute_stats(values: np.ndarray, percentiles: Sequence[float]) -> Dict[str,
         "percentiles": percentile_values
     }
 
+def _iter_dataset(
+    ds: h5py.Dataset,
+    sample_size: int,
+    max_points: Optional[int],
+    chunk_rows: int = CHUNK_ROWS,
+):
+    """Yield chunks from the first `sample_size` rows (and optional columns) of a dataset."""
+    if sample_size <= 0:
+        return
+
+    total_rows = min(sample_size, ds.shape[0])
+    idx = 0
+    while idx < total_rows:
+        end = min(idx + chunk_rows, total_rows)
+        if max_points is not None and ds.ndim > 1:
+            yield ds[idx:end, :max_points]
+        else:
+            yield ds[idx:end]
+        idx = end
+
+
 def scan_files(
     data_dir: str,
     file_names: Sequence[str],
-    key: str,
+    dataset_names: Sequence[str],
     sample_size: int,
     percentiles: Sequence[float],
     max_points: Optional[int] = None,
 ) -> Dict[str, Any]:
-    dataset: List[np.ndarray] = []
-    for name in file_names:
-        path = os.path.join(data_dir, f"{name}.h5py")
-        if not os.path.exists(path):
-            warnings.warn(f"File not found: {path}. Skipping.")
-            continue
+    """
+    Compute stats one dataset at a time to keep memory bounded.
 
-        with h5py.File(path, "r") as handle:
-            if key in handle:
-                source = handle[key]
-                if max_points is not None and source.ndim > 1:
-                    data = source[:sample_size, :max_points]
-                else:
-                    data = source[:sample_size]
-                dataset.append(np.asarray(data))
-    if not dataset:
-        empty = np.empty((0,), dtype=np.float32)
-        return compute_stats(empty, percentiles)
-    return compute_stats(np.concatenate(dataset, axis=0), percentiles)
+    Trade-off: files are reopened per dataset, but resident memory is limited to
+    one reservoir sample plus a small chunk buffer.
+    """
+    results: Dict[str, Any] = {}
+    iterator = (
+        tqdm(dataset_names, desc="Datasets", leave=False)
+        if tqdm is not None
+        else dataset_names
+    )
+
+    for key in iterator:
+        if tqdm is not None:
+            iterator.set_postfix_str(key)
+        stats = StreamingStats(sample_size=sample_size, percentiles=percentiles)
+
+        file_iter = (
+            tqdm(file_names, desc=f"{key}", leave=False)
+            if tqdm is not None
+            else file_names
+        )
+
+        for name in file_iter:
+            path = os.path.join(data_dir, f"{name}.h5py")
+            if not os.path.exists(path):
+                warnings.warn(f"File not found: {path}. Skipping.")
+                continue
+
+            with h5py.File(path, "r") as handle:
+                if key not in handle:
+                    continue
+                ds = handle[key]
+                chunk_iter = _iter_dataset(ds, sample_size=sample_size, max_points=max_points)
+                if tqdm is not None:
+                    # Total is approximate: rows/chunk_rows up to sample_size.
+                    total_chunks = max(1, min(sample_size, ds.shape[0]) // CHUNK_ROWS + 1)
+                    chunk_iter = tqdm(chunk_iter, total=total_chunks, desc="chunks", leave=False)
+                for chunk in chunk_iter:
+                    stats.update(chunk)
+
+        results[key] = stats.finalize()
+
+    return results
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:
     if output is None:
@@ -289,17 +411,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("No datasets selected for scanning.")
     if not args.files:
         raise ValueError("No input files specified for scanning.")
-    results={}
-    iterator = tqdm(args.dataset_names) if tqdm is not None else args.dataset_names
-    for key in iterator:
-        results[key] = scan_files(
-            data_dir=args.data_dir,
-            file_names=args.files,
-            key=key,
-            sample_size=args.sample_size,
-            max_points=args.max_points,
-            percentiles=args.percentiles,
-        )
+    results = scan_files(
+        data_dir=args.data_dir,
+        file_names=args.files,
+        dataset_names=args.dataset_names,
+        sample_size=args.sample_size,
+        max_points=args.max_points,
+        percentiles=args.percentiles,
+    )
 
     _dump_results(results, args.output)
     return 0

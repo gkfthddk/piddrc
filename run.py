@@ -28,7 +28,7 @@ from pid.models.pointset_mamba import PointSetMamba
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_ptv3 import PointSetTransformerV3
 from pid.models.pointset_mlppp import PointSetMLPpp
-from pid.models.poinset_graph import PointSetGraphNet
+from pid.models.pointset_graph import PointSetGraphNet
 from pid.models.pointset_transformer import PointSetTransformer
 
 MODEL_REGISTRY = {
@@ -76,7 +76,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--train_files",
         type=Path,
         nargs="+",
-        default=("h5s/e-_1-100GeV.h5py", "h5s/gamma_1-100GeV.h5py", "h5s/pi0_1-100GeV.h5py", "h5s/pi+_1-100GeV.h5py"),
+        default=("e-_1-100GeV_1.h5py", "gamma_1-100GeV_1.h5py", "pi0_1-100GeV_1.h5py", "pi+_1-100GeV_1.h5py"),
         help="Paths to the training HDF5 files",
     )
     io_group.add_argument(
@@ -96,7 +96,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--stat_file",
         type=Path,
-        default="h5s/stats_1-100GeV.yaml",
+        default="stats_1-100GeV.yaml",
         help="input channel statistics yaml files",
     )
     io_group.add_argument(
@@ -151,7 +151,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--max_points",
         type=int,
-        default=1000,
+        default=2000,
         help="Down-sample each event to this many hits",
     )
     io_group.add_argument(
@@ -186,7 +186,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--train_limit",
         type=int,
-        default=None,
+        default=60000,
         help="Optional per-file limit on the number of training events for quick tests",
     )
 
