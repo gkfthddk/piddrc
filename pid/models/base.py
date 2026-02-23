@@ -16,11 +16,13 @@ class ModelOutputs:
     logits: torch.Tensor
     energy: torch.Tensor
     log_sigma: Optional[torch.Tensor]
+    direction: Optional[torch.Tensor]
+    direction_log_sigma: Optional[torch.Tensor]
     extras: Dict[str, torch.Tensor]
 
 
 class MultiTaskHead(nn.Module):
-    """Shared head that predicts class logits, energy and log-variance."""
+    """Shared head that predicts class logits, energy and optional regressions."""
 
     def __init__(
         self,
@@ -30,6 +32,8 @@ class MultiTaskHead(nn.Module):
         dropout: float = 0.1,
         num_classes: int,
         use_uncertainty: bool = True,
+        use_direction: bool = False,
+        direction_dim: int = 2,
     ) -> None:
         super().__init__()
         layers: List[nn.Module] = [nn.LayerNorm(in_dim)]
@@ -47,13 +51,32 @@ class MultiTaskHead(nn.Module):
         self.classifier = nn.Linear(prev, num_classes)
         self.regressor = nn.Linear(prev, 1)
         self.log_sigma_head = nn.Linear(prev, 1) if use_uncertainty else None
+        self.direction_head = nn.Linear(prev, direction_dim) if use_direction else None
+        self.direction_log_sigma_head = (
+            nn.Linear(prev, direction_dim)
+            if (use_direction and use_uncertainty)
+            else None
+        )
 
     def forward(self, features: torch.Tensor) -> ModelOutputs:
         shared = self.backbone(features)
         logits = self.classifier(shared)
         energy = self.regressor(shared).squeeze(-1)
         log_sigma = self.log_sigma_head(shared).squeeze(-1) if self.log_sigma_head is not None else None
-        return ModelOutputs(logits=logits, energy=energy, log_sigma=log_sigma, extras={"shared": shared})
+        direction = self.direction_head(shared) if self.direction_head is not None else None
+        direction_log_sigma = (
+            self.direction_log_sigma_head(shared)
+            if self.direction_log_sigma_head is not None
+            else None
+        )
+        return ModelOutputs(
+            logits=logits,
+            energy=energy,
+            log_sigma=log_sigma,
+            direction=direction,
+            direction_log_sigma=direction_log_sigma,
+            extras={"shared": shared},
+        )
 
 
 class MaskedMaxMeanPool(nn.Module):
@@ -173,6 +196,8 @@ class PointSetAggregator(nn.Module):
         num_classes: int,
         use_summary: bool,
         use_uncertainty: bool,
+        use_direction: bool = False,
+        direction_dim: int = 2,
     ) -> None:
         super().__init__()
         self.pool = MaskedMaxMeanPool(feature_dim)
@@ -184,6 +209,8 @@ class PointSetAggregator(nn.Module):
             dropout=dropout,
             num_classes=num_classes,
             use_uncertainty=use_uncertainty,
+            use_direction=use_direction,
+            direction_dim=direction_dim,
         )
 
     def forward(self, per_point: torch.Tensor, batch: dict[str, torch.Tensor]) -> ModelOutputs:

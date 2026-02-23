@@ -21,6 +21,8 @@ class TrainingConfig:
     log_every: int = 10
     classification_weight: float = 1.0
     regression_weight: float = 1.0
+    direction_weight: float = 1.0
+    use_direction_regression: bool = False
     max_grad_norm: Optional[float] = None
     label_smoothing: float = 0.0
     use_amp: bool = True
@@ -139,13 +141,18 @@ class Trainer:
         losses: List[float] = []
         cls_losses: List[float] = []
         reg_losses: List[float] = []
+        dir_losses: List[float] = []
         logits_list: List[torch.Tensor] = []
         labels_list: List[torch.Tensor] = []
         energy_pred: List[torch.Tensor] = []
         energy_true: List[torch.Tensor] = []
+        direction_pred: List[torch.Tensor] = []
+        direction_true: List[torch.Tensor] = []
         log_sigma_list: List[torch.Tensor] = []
+        direction_log_sigma_list: List[torch.Tensor] = []
         event_id_list: List[torch.Tensor] = []
         sigma_values: List[float] = []
+        direction_sigma_values: List[float] = []
 
         autocast_enabled = self.scaler.is_enabled()
 
@@ -159,6 +166,7 @@ class Trainer:
             loss: Optional[torch.Tensor] = None
             loss_cls: Optional[torch.Tensor] = None
             loss_reg: Optional[torch.Tensor] = None
+            loss_dir: Optional[torch.Tensor] = None
             check+=1
             if check==3 and self.config.profile and training:
                 activities = [ProfilerActivity.CPU]
@@ -183,13 +191,17 @@ class Trainer:
                         if not torch.all(valid_mask):
                             outputs = self._mask_outputs(outputs, valid_mask)
                             effective_batch = self._mask_batch(batch, valid_mask)
-                        loss_cls, loss_reg = self._compute_losses(outputs, effective_batch, epoch)
-                        loss = self.config.classification_weight * loss_cls + self.config.regression_weight * loss_reg
+                        loss_cls, loss_reg, loss_dir = self._compute_losses(outputs, effective_batch, epoch)
+                        loss = (
+                            self.config.classification_weight * loss_cls
+                            + self.config.regression_weight * loss_reg
+                            + self.config.direction_weight * loss_dir
+                        )
 
             if skip_step:
                 continue
 
-            assert loss is not None and loss_cls is not None and loss_reg is not None
+            assert loss is not None and loss_cls is not None and loss_reg is not None and loss_dir is not None
 
             if training:
                 self._global_step += 1
@@ -205,16 +217,24 @@ class Trainer:
             losses.append(loss.detach().item())
             cls_losses.append(loss_cls.detach().item())
             reg_losses.append(loss_reg.detach().item())
+            dir_losses.append(loss_dir.detach().item())
             logits_list.append(outputs.logits.detach().cpu())
             labels_list.append(effective_batch["labels"].detach().cpu())
             energy_pred.append(outputs.energy.detach().cpu())
             energy_true.append(effective_batch["energy"].detach().cpu())
+            if self.config.use_direction_regression and outputs.direction is not None and "direction" in effective_batch:
+                direction_pred.append(outputs.direction.detach().cpu())
+                direction_true.append(effective_batch["direction"].detach().cpu())
             if collect_outputs and "event_id" in effective_batch:
                 event_id_list.append(effective_batch["event_id"].detach().cpu())
             if outputs.log_sigma is not None:
                 log_sigma = outputs.log_sigma.detach()
                 log_sigma_list.append(log_sigma.cpu())
                 sigma_values.append(float(torch.exp(log_sigma).mean().item()))
+            if outputs.direction_log_sigma is not None:
+                direction_log_sigma = outputs.direction_log_sigma.detach()
+                direction_log_sigma_list.append(direction_log_sigma.cpu())
+                direction_sigma_values.append(float(torch.exp(direction_log_sigma).mean().item()))
 
             if step % self.config.log_every == 0:
                 postfix = {
@@ -223,6 +243,8 @@ class Trainer:
                 }
                 if sigma_values:
                     postfix["sigma"] = sum(sigma_values) / len(sigma_values)
+                if direction_sigma_values:
+                    postfix["dir_sigma"] = sum(direction_sigma_values) / len(direction_sigma_values)
                 try:
                     auc = metrics_mod.roc_auc(torch.cat(logits_list), torch.cat(labels_list))
                 except RuntimeError:
@@ -237,16 +259,21 @@ class Trainer:
             labels_list,
             energy_pred,
             energy_true,
+            direction_pred,
+            direction_true,
             log_sigma_list if log_sigma_list else None,
+            direction_log_sigma_list if direction_log_sigma_list else None,
         )
         metrics["invalid_entries"] = float(skipped_entries)
         metrics.update({
             "loss": float(sum(losses) / max(len(losses), 1)),
             "loss_cls": float(sum(cls_losses) / max(len(cls_losses), 1)),
             "loss_reg": float(sum(reg_losses) / max(len(reg_losses), 1)),
+            "loss_dir": float(sum(dir_losses) / max(len(dir_losses), 1)),
         })
         metrics["classification_loss"] = metrics["loss_cls"]
         metrics["regression_loss"] = metrics["loss_reg"]
+        metrics["direction_loss"] = metrics["loss_dir"]
 
         if not collect_outputs:
             return metrics
@@ -258,6 +285,8 @@ class Trainer:
         labels = torch.cat(list(labels_list))
         energy_p = torch.cat(list(energy_pred))
         energy_t = torch.cat(list(energy_true))
+        direction_p = torch.cat(list(direction_pred)) if direction_pred else None
+        direction_t = torch.cat(list(direction_true)) if direction_true else None
 
         output_records: List[Dict[str, Any]] = []
         event_ids = (
@@ -266,6 +295,11 @@ class Trainer:
             else torch.empty(0, 2, dtype=torch.long)
         )
         log_sigma_tensor = torch.cat(list(log_sigma_list)) if log_sigma_list else None
+        direction_log_sigma_tensor = (
+            torch.cat(list(direction_log_sigma_list))
+            if direction_log_sigma_list
+            else None
+        )
 
         for idx in range(logits.shape[0]):
             record: Dict[str, Any] = {
@@ -276,8 +310,13 @@ class Trainer:
                 "energy_pred": float(energy_p[idx].item()),
                 "energy_true": float(energy_t[idx].item()),
             }
+            if direction_p is not None and direction_t is not None:
+                record["direction_pred"] = direction_p[idx].tolist()
+                record["direction_true"] = direction_t[idx].tolist()
             if log_sigma_tensor is not None:
                 record["log_sigma"] = float(log_sigma_tensor[idx].item())
+            if direction_log_sigma_tensor is not None:
+                record["direction_log_sigma"] = direction_log_sigma_tensor[idx].tolist()
             output_records.append(record)
 
         return metrics, output_records
@@ -292,7 +331,9 @@ class Trainer:
         for group, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
             group["lr"] = base_lr * progress
 
-    def _compute_losses(self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor], epoch: int=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_losses(
+        self, outputs: ModelOutputs, batch: Dict[str, torch.Tensor], epoch: int=None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         labels = batch["labels"]
         energy = batch["energy"]
         loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=self.config.label_smoothing)
@@ -305,7 +346,23 @@ class Trainer:
             loss_reg = loss_reg.mean()
         else:
             loss_reg = nn.functional.mse_loss(outputs.energy, energy)
-        return loss_cls, loss_reg
+        if self.config.use_direction_regression:
+            if outputs.direction is None:
+                raise RuntimeError("Direction regression enabled but model does not output direction predictions.")
+            if "direction" not in batch:
+                raise RuntimeError("Direction regression enabled but batch has no 'direction' target.")
+            residual = batch["direction"] - outputs.direction
+            if outputs.direction_log_sigma is not None:
+                direction_log_sigma = outputs.direction_log_sigma.clamp(min=-5.0, max=5.0)
+                if epoch is not None and epoch < self.config.freeze_sigma:
+                    direction_log_sigma = torch.zeros_like(direction_log_sigma).detach()
+                loss_dir = 0.5 * torch.exp(-2.0 * direction_log_sigma) * (residual ** 2) + direction_log_sigma
+                loss_dir = loss_dir.mean()
+            else:
+                loss_dir = nn.functional.mse_loss(outputs.direction, batch["direction"])
+        else:
+            loss_dir = torch.zeros((), device=outputs.energy.device, dtype=outputs.energy.dtype)
+        return loss_cls, loss_reg, loss_dir
 
     def _move_to_device(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return {key: value.to(self.device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
@@ -316,13 +373,23 @@ class Trainer:
         labels_list: Iterable[torch.Tensor],
         energy_pred: Iterable[torch.Tensor],
         energy_true: Iterable[torch.Tensor],
+        direction_pred: Iterable[torch.Tensor],
+        direction_true: Iterable[torch.Tensor],
         log_sigma_list: Optional[Iterable[torch.Tensor]] = None,
+        direction_log_sigma_list: Optional[Iterable[torch.Tensor]] = None,
     ) -> Dict[str, float]:
         logits_tensors = list(logits_list)
         labels_tensors = list(labels_list)
         energy_pred_tensors = list(energy_pred)
         energy_true_tensors = list(energy_true)
+        direction_pred_tensors = list(direction_pred)
+        direction_true_tensors = list(direction_true)
         log_sigma_tensors = list(log_sigma_list) if log_sigma_list is not None else None
+        direction_log_sigma_tensors = (
+            list(direction_log_sigma_list)
+            if direction_log_sigma_list is not None
+            else None
+        )
 
         if not logits_tensors:
             metrics: Dict[str, float] = {
@@ -331,6 +398,7 @@ class Trainer:
                 "energy_rmse": float("nan"),
                 "energy_bias": float("nan"),
                 "regression_mse": float("nan"),
+                "direction_mse": float("nan"),
                 "linearity_slope": float("nan"),
                 "linearity_intercept": float("nan"),
             }
@@ -338,6 +406,8 @@ class Trainer:
             metrics["classification_auc"] = float("nan")
             if log_sigma_tensors is not None:
                 metrics["regression_sigma"] = float("nan")
+            if direction_log_sigma_tensors is not None:
+                metrics["direction_sigma"] = float("nan")
             return metrics
 
         logits = torch.cat(logits_tensors)
@@ -356,9 +426,18 @@ class Trainer:
         metrics["energy_rmse"] = resolution["rmse"]
         metrics["energy_bias"] = resolution["bias"]
         metrics["regression_mse"] = float(torch.mean((energy_p - energy_t) ** 2).item())
+        if direction_pred_tensors and direction_true_tensors:
+            direction_p = torch.cat(direction_pred_tensors)
+            direction_t = torch.cat(direction_true_tensors)
+            metrics["direction_mse"] = float(torch.mean((direction_p - direction_t) ** 2).item())
+        else:
+            metrics["direction_mse"] = float("nan")
         if log_sigma_tensors is not None:
             log_sigma = torch.cat(log_sigma_tensors)
             metrics["regression_sigma"] = float(torch.exp(log_sigma).mean().item())
+        if direction_log_sigma_tensors is not None:
+            direction_log_sigma = torch.cat(direction_log_sigma_tensors)
+            metrics["direction_sigma"] = float(torch.exp(direction_log_sigma).mean().item())
         slope, intercept = metrics_mod.energy_linearity(energy_p, energy_t)
         metrics["linearity_slope"] = slope
         metrics["linearity_intercept"] = intercept
@@ -374,6 +453,11 @@ class Trainer:
         mask = logits_finite & energy_finite
         if outputs.log_sigma is not None:
             mask = mask & torch.isfinite(outputs.log_sigma)
+        if self.config.use_direction_regression and outputs.direction is not None and "direction" in batch:
+            direction_finite = torch.isfinite(outputs.direction).all(dim=-1) & torch.isfinite(batch["direction"]).all(dim=-1)
+            mask = mask & direction_finite
+        if outputs.direction_log_sigma is not None:
+            mask = mask & torch.isfinite(outputs.direction_log_sigma).all(dim=-1)
         return mask
 
     def _mask_outputs(self, outputs: ModelOutputs, mask: torch.Tensor) -> ModelOutputs:
@@ -385,10 +469,18 @@ class Trainer:
             else:
                 extras[key] = value
         log_sigma = outputs.log_sigma[mask] if outputs.log_sigma is not None else None
+        direction = outputs.direction[mask] if outputs.direction is not None else None
+        direction_log_sigma = (
+            outputs.direction_log_sigma[mask]
+            if outputs.direction_log_sigma is not None
+            else None
+        )
         return ModelOutputs(
             logits=outputs.logits[mask],
             energy=outputs.energy[mask],
             log_sigma=log_sigma,
+            direction=direction,
+            direction_log_sigma=direction_log_sigma,
             extras=extras,
         )
 

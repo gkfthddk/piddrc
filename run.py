@@ -149,6 +149,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Dataset name containing the regression target (energy)",
     )
     io_group.add_argument(
+        "--enable_direction_regression",
+        action="store_true",
+        help="Enable auxiliary regression for shower direction.",
+    )
+    io_group.add_argument(
+        "--direction_keys",
+        type=str,
+        nargs="+",
+        default=("GenParticles.momentum.theta", "GenParticles.momentum.phi"),
+        help="Dataset names containing direction regression targets.",
+    )
+    io_group.add_argument(
         "--max_points",
         type=int,
         default=2000,
@@ -271,6 +283,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
+    train_group.add_argument(
+        "--direction_weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to the optional direction regression loss.",
+    )
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
     train_group.add_argument("--num_workers", type=int, default=8)
 
@@ -388,6 +406,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.pos_keys = [
             key.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for key in args.pos_keys
         ]
+    if args.enable_direction_regression and len(args.direction_keys) == 0:
+        raise ValueError("Provide at least one direction key when --enable_direction_regression is set.")
+    if args.direction_weight < 0:
+        raise ValueError("direction_weight must be non-negative.")
     
     # If a single GPU is specified, default device to cuda:0
     if gpu_args.gpu and "," not in gpu_args.gpu and args.device == "cuda":
@@ -504,6 +526,7 @@ def build_datasets(
         pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
+        direction_keys=args.direction_keys if args.enable_direction_regression else None,
         stat_file=args.stat_file,
         max_points=args.max_points,
         pool=pool,
@@ -522,6 +545,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
+            direction_keys=args.direction_keys if args.enable_direction_regression else None,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -539,6 +563,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
+            direction_keys=args.direction_keys if args.enable_direction_regression else None,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -587,6 +612,10 @@ def print_dataset_summary(
     print(f"  Hit features ({len(base_dataset.hit_features)}): {hit_features}")
     print(f"  Summary dimension: {summary_dim}")
     print(f"  Classes ({len(base_dataset.classes)}): {class_names}")
+    if getattr(base_dataset, "direction_keys", ()):
+        print(f"  Direction targets: {', '.join(base_dataset.direction_keys)}")
+    else:
+        print("  Direction targets: disabled")
     max_points = getattr(base_dataset, "max_points", None)
     print("  Max points per event: {}".format(max_points if max_points is not None else "unbounded"))
 
@@ -623,6 +652,8 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
         "dropout": args.dropout,
         "use_summary": not args.disable_summary,
         "use_uncertainty": not args.disable_uncertainty,
+        "use_direction": args.enable_direction_regression,
+        "direction_dim": len(args.direction_keys),
     }
 
     if model_name == "mlp":
@@ -735,6 +766,10 @@ def print_model_summary(
         tensors: list[torch.Tensor] = [output.logits, output.energy]
         if output.log_sigma is not None:
             tensors.append(output.log_sigma)
+        if output.direction is not None:
+            tensors.append(output.direction)
+        if output.direction_log_sigma is not None:
+            tensors.append(output.direction_log_sigma)
         tensors.extend(output.extras.values())
         return tuple(tensors)
 
@@ -772,6 +807,8 @@ def configure_trainer(
     show_progress: bool,
     lr_scheduler_name: str | None,
     freeze_sigma: int,
+    direction_weight: float,
+    use_direction_regression: bool,
     profile: bool,
     profile_dir: Path | None,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
@@ -782,6 +819,8 @@ def configure_trainer(
         max_grad_norm=max_grad_norm,
         label_smoothing=label_smoothing, 
         use_amp=use_amp,
+        direction_weight=direction_weight,
+        use_direction_regression=use_direction_regression,
         checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
         show_progress=show_progress,
         early_stopping_patience=5,
@@ -875,6 +914,7 @@ def main() -> None:
         pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
+        direction_keys=args.direction_keys if args.enable_direction_regression else None,
         stat_file=args.stat_file,
         max_points=args.max_points,
         pool=getattr(args, "pool", 1),
@@ -937,6 +977,8 @@ def main() -> None:
         checkpoint_path=args.checkpoint,
         lr_scheduler_name=args.lr_scheduler,
         freeze_sigma=args.freeze_sigma,
+        direction_weight=args.direction_weight,
+        use_direction_regression=args.enable_direction_regression,
         profile=args.profile,
         profile_dir=args.profile_dir,
     )

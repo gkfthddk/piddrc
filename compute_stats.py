@@ -316,7 +316,9 @@ def _iter_dataset(
 def scan_files(
     data_dir: str,
     file_names: Sequence[str],
-    dataset_names: Sequence[str],
+    dataset_names: Optional[Sequence[str]] = None,
+    *,
+    key: Optional[str] = None,
     sample_size: int,
     percentiles: Sequence[float],
     max_points: Optional[int] = None,
@@ -327,6 +329,16 @@ def scan_files(
     Trade-off: files are reopened per dataset, but resident memory is limited to
     one reservoir sample plus a small chunk buffer.
     """
+    if key is not None:
+        if dataset_names is not None:
+            raise ValueError("Provide either 'key' or 'dataset_names', not both.")
+        dataset_names = [key]
+        single_key_mode = True
+    else:
+        if dataset_names is None:
+            raise ValueError("Either 'dataset_names' or 'key' must be provided.")
+        single_key_mode = False
+
     results: Dict[str, Any] = {}
     iterator = (
         tqdm(dataset_names, desc="Datasets", leave=False)
@@ -365,6 +377,8 @@ def scan_files(
 
         results[key] = stats.finalize()
 
+    if single_key_mode:
+        return results[key]  # type: ignore[index]
     return results
 
 def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None) -> None:

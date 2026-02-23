@@ -42,6 +42,8 @@ class PointSetMLP(nn.Module):
         dropout: float = 0.1,
         use_summary: bool = True,
         use_uncertainty: bool = True,
+        use_direction: bool = False,
+        direction_dim: int = 2,
     ) -> None:
         super().__init__()
         self.backbone = PointSetMLPEncoder(in_channels, backbone_channels)
@@ -53,6 +55,8 @@ class PointSetMLP(nn.Module):
             num_classes=num_classes,
             use_summary=use_summary,
             use_uncertainty=use_uncertainty,
+            use_direction=use_direction,
+            direction_dim=direction_dim,
         )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> ModelOutputs:

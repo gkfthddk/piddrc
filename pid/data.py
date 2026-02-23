@@ -57,6 +57,7 @@ class EventRecord:
     summary: torch.Tensor
     label: int
     energy: torch.Tensor
+    direction: torch.Tensor | None
     event_id: Tuple[int, int]
     pos: torch.Tensor | None = None
     cid: torch.Tensor | None = None
@@ -162,6 +163,7 @@ class DualReadoutEventDataset(Dataset):
         hit_features: Sequence[str],
         label_key: str,
         energy_key: str,
+        direction_keys: Optional[Sequence[str]] = None,
         stat_file: str,
         max_points: Optional[int] = None,
         pool: int = 1,
@@ -186,9 +188,20 @@ class DualReadoutEventDataset(Dataset):
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
-        store="/store/ml/dual-readout/h5s"
-        self.files: Tuple[str, ...] = [f"{store}/{f}" for f in files]
-        self.stat_file = os.fspath(f"{store}/{stat_file}")
+        store = "/store/ml/dual-readout/h5s"
+
+        def _resolve_path(path_like: str) -> str:
+            raw = os.fspath(path_like)
+            # Backward-compatibility guard: older code could accidentally build
+            # '/store/...//tmp/...' when joining store with an absolute tmp path.
+            if raw.startswith(f"{store}//"):
+                raw = raw[len(store) + 1 :]
+            if os.path.isabs(raw) or os.path.exists(raw):
+                return raw
+            return os.path.join(store, raw)
+
+        self.files: Tuple[str, ...] = tuple(_resolve_path(f) for f in files)
+        self.stat_file = _resolve_path(stat_file)
         self.hit_features: Tuple[str, ...] = tuple(hit_features)
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
@@ -225,6 +238,7 @@ class DualReadoutEventDataset(Dataset):
 
         self.label_key = label_key
         self.energy_key = energy_key
+        self.direction_keys: Tuple[str, ...] = tuple(direction_keys or ())
         self.max_points = max_points
         if(pool > 1):
             is_cherenkov_key=is_cherenkov_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
@@ -385,13 +399,26 @@ class DualReadoutEventDataset(Dataset):
         summary = self.summary_fn(c_amp, s_amp, points, self.feature_to_index)
         label_value = handle[self.label_key][start:stop]
         energy = handle[self.energy_key][start:stop]
+        direction = None
+        if self.direction_keys:
+            direction_components: List[np.ndarray] = []
+            for key in self.direction_keys:
+                if key not in handle:
+                    raise KeyError(
+                        f"Direction key '{key}' not found in file '{handle.filename}'. "
+                        "Disable direction regression or choose valid keys."
+                    )
+                component = np.asarray(handle[key][start:stop], dtype=np.float32).reshape(-1)
+                direction_components.append(component)
+            direction = np.stack(direction_components, axis=-1)
         chunk={
             "start": start, 
             "points": points,
             "cid": cid,
             "summary": summary,
             "label_value": label_value,
-            "energy": energy
+            "energy": energy,
+            "direction": direction,
             }   
         return chunk
 
@@ -401,6 +428,7 @@ class DualReadoutEventDataset(Dataset):
         label_value = chunk["label_value"][local_index]
         summary = chunk["summary"][local_index]
         energy = chunk["energy"][local_index]
+        direction = chunk["direction"][local_index] if chunk.get("direction") is not None else None
 
         pos_tensor: torch.Tensor | None = None
         if self.pos_keys:
@@ -429,6 +457,7 @@ class DualReadoutEventDataset(Dataset):
             summary=torch.from_numpy(summary.astype(np.float32)),
             label=label,
             energy=torch.from_numpy(energy),
+            direction=torch.from_numpy(np.atleast_1d(direction)) if direction is not None else None,
             event_id=(file_id, event_id),
             pos=pos_tensor,
             cid=torch.from_numpy(np.asarray(cid)),
@@ -685,6 +714,18 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
     summary = torch.stack([record.summary for record in batch], dim=0)
     labels = torch.tensor([record.label for record in batch], dtype=torch.long)
     energy = torch.stack([record.energy for record in batch], dim=0).squeeze(-1)
+    direction_template = next((record.direction for record in batch if record.direction is not None), None)
+    direction = None
+    if direction_template is not None:
+        direction = torch.stack(
+            [
+                record.direction
+                if record.direction is not None
+                else torch.zeros_like(direction_template)
+                for record in batch
+            ],
+            dim=0,
+        )
     event_id = torch.tensor([record.event_id for record in batch], dtype=torch.long)
     pos_template = next((record.pos for record in batch if record.pos is not None), None)
     pos = None
@@ -720,6 +761,8 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
         "energy": energy,
         "event_id": event_id,
     }
+    if direction is not None:
+        collated["direction"] = direction
     if pos is not None:
         collated["pos"] = pos
     return collated
