@@ -59,6 +59,7 @@ class EventRecord:
     energy: torch.Tensor
     event_id: Tuple[int, int]
     pos: torch.Tensor | None = None
+    cid: torch.Tensor | None = None
 
 
 class DualReadoutEventDataset(Dataset):
@@ -166,6 +167,7 @@ class DualReadoutEventDataset(Dataset):
         pool: int = 1,
         is_cherenkov_key: str = "DRcalo3dHits.type",
         amp_sum_key: str = "DRcalo3dHits.amplitude_sum",
+        cid_key: str = "DRcalo3dHits.cellID",
         pos_keys: Optional[List[str]] = [
             "DRcalo3dHits.position.x",
             "DRcalo3dHits.position.y",
@@ -184,8 +186,9 @@ class DualReadoutEventDataset(Dataset):
     ) -> None:
         if len(files) == 0:
             raise ValueError("At least one input file must be provided.")
-        self.files: Tuple[str, ...] = tuple(files)
-        self.stat_file = os.fspath(stat_file)
+        store="/store/ml/dual-readout/h5s"
+        self.files: Tuple[str, ...] = [f"{store}/{f}" for f in files]
+        self.stat_file = os.fspath(f"{store}/{stat_file}")
         self.hit_features: Tuple[str, ...] = tuple(hit_features)
         if len(self.hit_features) == 0:
             raise ValueError("hit_features must contain at least one feature name")
@@ -219,16 +222,19 @@ class DualReadoutEventDataset(Dataset):
             self.feature_max[name] = scale
         self._channel_stat = channel_stat
 
+
         self.label_key = label_key
         self.energy_key = energy_key
         self.max_points = max_points
         if(pool > 1):
             is_cherenkov_key=is_cherenkov_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
             amp_sum_key=amp_sum_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
+            cid_key=cid_key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}")
             pos_keys=[key.replace("DRcalo3dHits",f"DRcalo3dHits{pool}") for key in pos_keys]
 
         self.is_cherenkov_key = is_cherenkov_key
         self.amp_sum_key = amp_sum_key
+        self.cid_key = cid_key
         self.pos_keys = pos_keys
         if summary_fn is None:
             self.summary_fn: AmpAwareSummaryFn = self._amp_summary
@@ -362,6 +368,7 @@ class DualReadoutEventDataset(Dataset):
         start = chunk_start
         stop = min(start + self.cache_size, len(handle[self.label_key]))
         hits = [np.asarray(handle[feature][start:stop,:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+        cid=handle[self.cid_key][start:stop,:self.max_points]
         points = np.stack(hits, axis=-1)
 
         def _read_optional(dataset_name: str) -> float:
@@ -381,6 +388,7 @@ class DualReadoutEventDataset(Dataset):
         chunk={
             "start": start, 
             "points": points,
+            "cid": cid,
             "summary": summary,
             "label_value": label_value,
             "energy": energy
@@ -389,6 +397,7 @@ class DualReadoutEventDataset(Dataset):
 
     def _load_event(self, chunk: Mapping[str, Any], local_index: int, file_id: int, event_id: int) -> EventRecord:
         points = chunk["points"][local_index]
+        cid = chunk["cid"][local_index]
         label_value = chunk["label_value"][local_index]
         summary = chunk["summary"][local_index]
         energy = chunk["energy"][local_index]
@@ -422,6 +431,7 @@ class DualReadoutEventDataset(Dataset):
             energy=torch.from_numpy(energy),
             event_id=(file_id, event_id),
             pos=pos_tensor,
+            cid=torch.from_numpy(np.asarray(cid)),
         )
 
     # ------------------------------------------------------------------
@@ -688,10 +698,19 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
 
     for i, record in enumerate(batch):
         num_hits = record.points.shape[0]
-        points[i, :num_hits] = record.points
+        if record.cid is not None and num_hits > 0:
+            cid = record.cid[:num_hits]
+            tail = cid[num_hits - 1]
+            non_tail = cid[: num_hits - 1] != tail
+            diff_idx = torch.nonzero(non_tail, as_tuple=False)
+            if diff_idx.numel() == 0:
+                num_hits = 0
+            else:
+                num_hits = int(diff_idx[-1].item()) + 1
+        points[i, :num_hits] = record.points[:num_hits]
         mask[i, :num_hits] = True
         if pos is not None and record.pos is not None:
-            pos[i, :num_hits] = record.pos
+            pos[i, :num_hits] = record.pos[:num_hits]
 
     collated = {
         "points": points,

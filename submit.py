@@ -24,7 +24,7 @@ submit_desc={
     'getenv':'True',
     'should_transfer_files':'YES',
     'when_to_transfer_output':'ON_EXIT',
-    'request_memory':f'50GB',
+    'request_memory':f'60GB',
     'request_cpus':f'4',
     'request_gpus':1,
     'request_disk':f'84092',
