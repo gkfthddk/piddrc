@@ -35,6 +35,42 @@ AmpAwareSummaryFn = Callable[[float, float, np.ndarray, Mapping[str, int]], np.n
 SummaryFnType = Union[SummaryFn, AmpAwareSummaryFn]
 
 
+def _trim_left_to_cid_boundary(cid: torch.Tensor, cut: int) -> int:
+    """Move ``cut`` to the previous readout boundary so no cid is partially kept."""
+    if cut <= 0:
+        return 0
+    if cut >= cid.shape[0]:
+        return int(cut)
+    if cid[cut - 1] != cid[cut]:
+        return int(cut)
+    boundary_diff = torch.nonzero(cid[:cut] != cid[cut - 1], as_tuple=False)
+    if boundary_diff.numel() == 0:
+        return 0
+    return int(boundary_diff[-1].item()) + 1
+
+
+def _adaptive_keep_fraction(
+    energy_value: float,
+    min_frac: float,
+    max_frac: float,
+    e_min: float,
+    e_max: float,
+) -> float:
+    """Energy-adaptive keep fraction in [min_frac, max_frac], linear in log10(E)."""
+    if not np.isfinite(energy_value) or energy_value <= 0:
+        return max_frac
+    if e_max <= e_min:
+        return max_frac
+
+    lo = min(min_frac, max_frac)
+    hi = max(min_frac, max_frac)
+    log_e = np.log10(max(energy_value, e_min))
+    t = (log_e - np.log10(e_min)) / (np.log10(e_max) - np.log10(e_min))
+    t = float(np.clip(t, 0.0, 1.0))
+    frac = hi - (hi - lo) * t
+    return float(np.clip(frac, lo, hi))
+
+
 def _decode_label(value: np.ndarray) -> str:
     """Decode a scalar value coming from HDF5 into a Python string."""
 
@@ -699,11 +735,31 @@ class DualReadoutEventDataset(Dataset):
         return np.asarray(stats, dtype=np.float32)
 
 
-def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
+def collate_events(
+    batch: Sequence[EventRecord],
+    *,
+    use_energy_adaptive_trim: Optional[bool] = None,
+    trim_amp_feature_index: Optional[int] = None,
+    trim_keep_frac_min: Optional[float] = None,
+    trim_keep_frac_max: Optional[float] = None,
+    trim_energy_min: Optional[float] = None,
+    trim_energy_max: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
     """Custom ``DataLoader`` collation for variable-length point clouds."""
 
     if len(batch) == 0:
         raise ValueError("Cannot collate an empty batch")
+
+    if use_energy_adaptive_trim is None:
+        use_energy_adaptive_trim = os.environ.get("PID_ENERGY_ADAPTIVE_TRIM", "1").lower() in {"1", "true", "yes", "on"}
+    if trim_keep_frac_min is None:
+        trim_keep_frac_min = float(os.environ.get("PID_TRIM_KEEP_FRAC_MIN", "0.70"))
+    if trim_keep_frac_max is None:
+        trim_keep_frac_max = float(os.environ.get("PID_TRIM_KEEP_FRAC_MAX", "1.00"))
+    if trim_energy_min is None:
+        trim_energy_min = float(os.environ.get("PID_TRIM_E_MIN", "1.0"))
+    if trim_energy_max is None:
+        trim_energy_max = float(os.environ.get("PID_TRIM_E_MAX", "100.0"))
 
     max_hits = max(record.points.shape[0] for record in batch)
     feature_dim = batch[0].points.shape[1]
@@ -739,15 +795,47 @@ def collate_events(batch: Sequence[EventRecord]) -> Dict[str, torch.Tensor]:
 
     for i, record in enumerate(batch):
         num_hits = record.points.shape[0]
+        cid = None
         if record.cid is not None and num_hits > 0:
-            cid = record.cid[:num_hits]
-            tail = cid[num_hits - 1]
-            non_tail = cid[: num_hits - 1] != tail
-            diff_idx = torch.nonzero(non_tail, as_tuple=False)
-            if diff_idx.numel() == 0:
+            cid = record.cid[:num_hits].reshape(-1)
+            if cid.is_floating_point():
+                valid = torch.isfinite(cid) & (cid != 0)
+            else:
+                valid = cid != 0
+            valid_idx = torch.nonzero(valid, as_tuple=False)
+            if valid_idx.numel() == 0:
                 num_hits = 0
             else:
-                num_hits = int(diff_idx[-1].item()) + 1
+                num_hits = min(num_hits, int(valid_idx[-1].item()) + 1)
+                cid = cid[:num_hits]
+
+        if use_energy_adaptive_trim and num_hits > 0:
+            energy_value = float(record.energy.reshape(-1)[0].item())
+            keep_frac = _adaptive_keep_fraction(
+                energy_value,
+                min_frac=trim_keep_frac_min,
+                max_frac=trim_keep_frac_max,
+                e_min=trim_energy_min,
+                e_max=trim_energy_max,
+            )
+            target_hits = num_hits
+            if trim_amp_feature_index is not None and 0 <= trim_amp_feature_index < record.points.shape[1]:
+                amp = record.points[:num_hits, trim_amp_feature_index]
+                amp = torch.nan_to_num(amp, nan=0.0, posinf=0.0, neginf=0.0).abs()
+                total_amp = float(torch.sum(amp).item())
+                if total_amp > 0.0:
+                    cumulative = torch.cumsum(amp, dim=0)
+                    threshold = keep_frac * total_amp
+                    reached = torch.nonzero(cumulative >= threshold, as_tuple=False)
+                    if reached.numel() > 0:
+                        target_hits = int(reached[0].item()) + 1
+            target_hits = max(1, min(target_hits, num_hits))
+            if cid is not None:
+                target_hits = _trim_left_to_cid_boundary(cid, target_hits)
+            num_hits = target_hits
+            if cid is not None:
+                cid = cid[:num_hits]
+
         points[i, :num_hits] = record.points[:num_hits]
         mask[i, :num_hits] = True
         if pos is not None and record.pos is not None:

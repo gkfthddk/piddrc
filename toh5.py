@@ -171,7 +171,7 @@ class H5FileProcessor:
         return keys
 
     @staticmethod
-    def _validated_indices(file_name: Path) -> List[int]:
+    def _validated_indices(file_name: Path) -> Optional[List[int]]:
         """
         Reads S_amp and C_amp from an HDF5 file and returns indices where
         both are valid (non-zero and below a threshold).
@@ -190,7 +190,7 @@ class H5FileProcessor:
                 return np.where(valid_mask)[0].tolist()
         except Exception as e:
             logger.error(f"Error validating indices in {file_name}: {e}")
-            return []
+            return None
 
     @staticmethod
     def _read_datasets(file_name: Path, dataset_names: List[str], indices: List[int]) -> Tuple[Path, Optional[Dict[str, np.ndarray]]]:
@@ -217,19 +217,25 @@ class H5FileProcessor:
         """Worker process to read data from HDF5 files and put it into a queue."""
         for file_name in file_list:
             indices = H5FileProcessor._validated_indices(file_name)
+            if indices is None:
+                queue.put((file_name, None, "validation_error"))
+                continue
             if not indices:
-                logger.info(f"No valid entries found or error in {file_name}.")
-                queue.put((file_name, None)) # Indicate no valid data for this file
+                queue.put((file_name, None, "no_valid_entries"))
                 continue
             
             file_name, data_dict = H5FileProcessor._read_datasets(file_name, dataset_names, indices)
-            queue.put((file_name, data_dict))
+            if data_dict is None:
+                queue.put((file_name, None, "read_error"))
+            else:
+                queue.put((file_name, data_dict, "ok"))
         #logger.info(f"Reader worker finished for {len(file_list)} files.")
 
     def _writer_worker(self, queue: multiprocessing.Queue, output_file: Path, total_files_to_process: int, stats_dict_proxy: Dict):
         """Worker process to write data from the queue to the output HDF5 file."""
         logger.info(f"Writer worker started for {output_file}")
         processed_files_count = 0
+        no_valid_entry_files: List[str] = []
 
         stats_calculators: Dict[str, StreamingStats] = {}
         if self.compute_stats:
@@ -239,17 +245,20 @@ class H5FileProcessor:
         with h5py.File(output_file, 'a') as f_out:
             with tqdm.tqdm(total=total_files_to_process, desc=f"Writing to {output_file.name}") as pbar:
                 while processed_files_count < total_files_to_process:
-                    file_name, data_dict = queue.get()
+                    file_name, data_dict, status = queue.get()
                     
-                    if file_name is None and data_dict is None: # Sentinel value to stop the writer
+                    if file_name is None and data_dict is None and status is None: # Sentinel value to stop the writer
                         break
 
                     processed_files_count += 1
                     pbar.update(1)
 
                     if data_dict is None:
-                        logger.warning(f"Skipping {file_name}")
-                        os.remove(file_name)
+                        if status == "no_valid_entries":
+                            no_valid_entry_files.append(str(file_name))
+                            logger.info(f"No valid entries found in {file_name}. Skipping.")
+                        else:
+                            logger.warning(f"Skipping {file_name} (status={status})")
                         continue
 
                     for dataset_name, data_chunk in data_dict.items():
@@ -280,6 +289,13 @@ class H5FileProcessor:
         if self.compute_stats and stats_dict_proxy is not None:
             for dataset_name, calculator in stats_calculators.items():
                 stats_dict_proxy[dataset_name] = calculator.finalize()
+
+        if no_valid_entry_files:
+            logger.warning(
+                "Files with zero valid entries (%d): %s",
+                len(no_valid_entry_files),
+                ", ".join(no_valid_entry_files),
+            )
 
         logger.info(f"Writer worker finished for {output_file}")
         print_memory_usage('Writer end')
@@ -393,7 +409,7 @@ class H5FileProcessor:
         logger.info("All reader processes finished.")
 
         # Send sentinel value to stop the writer process
-        data_queue.put((None, None))
+        data_queue.put((None, None, None))
         writer_process.join()
         logger.info("Writer process finished.")
 

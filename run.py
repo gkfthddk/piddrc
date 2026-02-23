@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -163,7 +164,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--max_points",
         type=int,
-        default=2000,
+        default=3000,
         help="Down-sample each event to this many hits",
     )
     io_group.add_argument(
@@ -201,6 +202,43 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=60000,
         help="Optional per-file limit on the number of training events for quick tests",
     )
+    io_group.add_argument(
+        "--no_energy_adaptive_trim",
+        dest="energy_adaptive_trim",
+        action="store_false",
+        help="Disable energy-based adaptive point trimming in collate.",
+    )
+    io_group.add_argument(
+        "--trim_keep_frac_min",
+        type=float,
+        default=0.9,
+        help="Minimum target kept amplitude fraction used by energy-adaptive trimming.",
+    )
+    io_group.add_argument(
+        "--trim_keep_frac_max",
+        type=float,
+        default=1.00,
+        help="Maximum target kept amplitude fraction used by energy-adaptive trimming.",
+    )
+    io_group.add_argument(
+        "--trim_energy_min",
+        type=float,
+        default=1.0,
+        help="Minimum energy scale (GeV) for adaptive trim mapping.",
+    )
+    io_group.add_argument(
+        "--trim_energy_max",
+        type=float,
+        default=100.0,
+        help="Maximum energy scale (GeV) for adaptive trim mapping.",
+    )
+    io_group.add_argument(
+        "--trim_amp_feature",
+        type=str,
+        default="DRcalo3dHits.amplitude_sum",
+        help="Hit feature used as amplitude proxy for energy-fraction-constrained trimming.",
+    )
+    parser.set_defaults(energy_adaptive_trim=True)
 
     model_group = parser.add_argument_group("Model")
     model_group.add_argument(
@@ -715,10 +753,11 @@ def build_dataloaders(
     *,
     batch_size: int,
     num_workers: int,
+    collate_fn: Any,
 ) -> Tuple[DataLoader, DataLoader | None, DataLoader | None]:
     loader_kwargs = {
         "batch_size": batch_size,
-        "collate_fn": collate_events,
+        "collate_fn": collate_fn,
         "num_workers": num_workers,
         "pin_memory": True,
         "persistent_workers": num_workers > 0,
@@ -922,6 +961,21 @@ def main() -> None:
         max_events=1,
         progress=False,
     )
+    trim_amp_feature_index = probe_dataset.feature_to_index.get(args.trim_amp_feature)
+    if args.energy_adaptive_trim and trim_amp_feature_index is None:
+        print(
+            f"WARNING: trim_amp_feature '{args.trim_amp_feature}' not found in hit_features. "
+            "Energy-adaptive trimming will be skipped."
+        )
+    runtime_collate = partial(
+        collate_events,
+        use_energy_adaptive_trim=args.energy_adaptive_trim,
+        trim_amp_feature_index=trim_amp_feature_index,
+        trim_keep_frac_min=args.trim_keep_frac_min,
+        trim_keep_frac_max=args.trim_keep_frac_max,
+        trim_energy_min=args.trim_energy_min,
+        trim_energy_max=args.trim_energy_max,
+    )
     model = build_model(args, probe_dataset)
     model.to(device)
 
@@ -936,7 +990,7 @@ def main() -> None:
     probe_loader = DataLoader(
         probe_dataset,
         batch_size=1,
-        collate_fn=collate_events,
+        collate_fn=runtime_collate,
         num_workers=0,
         pin_memory=False,
         persistent_workers=False,
@@ -961,6 +1015,7 @@ def main() -> None:
         test_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        collate_fn=runtime_collate,
     )
 
     trainer, optimizer = configure_trainer(
