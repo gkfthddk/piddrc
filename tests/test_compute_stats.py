@@ -7,6 +7,7 @@ import math
 import h5py
 import numpy as np
 import pytest
+import compute_stats as compute_stats_module
 from compute_stats import (
     DEFAULT_DATASETS,
     DEFAULT_DIR,
@@ -17,6 +18,12 @@ from compute_stats import (
     compute_stats,
     scan_files,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_tqdm(monkeypatch):
+    """Disable tqdm in tests to avoid non-TTY progress-bar hangs in CI."""
+    monkeypatch.setattr(compute_stats_module, "tqdm", None)
 
 
 def test_parse_args_populates_defaults():
