@@ -65,7 +65,8 @@ If your schema differs, pass custom `--hit_features`, `--pos_keys`, `--label_key
 
 ```bash
 python compute_stats.py \
-  --input train_electron.h5 train_pion.h5 \
+  --data_dir /path/to/h5s \
+  --files train_electron train_pion \
   --output stats.yaml
 ```
 
@@ -126,6 +127,17 @@ import torch
 
 dataset = DualReadoutEventDataset(
     files=["train_electron.h5", "train_pion.h5"],
+    hit_features=(
+        "DRcalo3dHits.amplitude_sum",
+        "DRcalo3dHits.type",
+        "DRcalo3dHits.time",
+        "DRcalo3dHits.time_end",
+        "DRcalo3dHits.position.x",
+        "DRcalo3dHits.position.y",
+        "DRcalo3dHits.position.z",
+    ),
+    label_key="GenParticles.PDG",
+    energy_key="E_gen",
     stat_file="stats.yaml",
 )
 
@@ -133,7 +145,7 @@ loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_eve
 
 sample = dataset[0]
 model = PointSetMamba(
-    in_channels=sample.hits.shape[-1],
+    in_channels=sample.points.shape[-1],
     summary_dim=sample.summary.numel(),
     num_classes=len(dataset.classes),
 )
