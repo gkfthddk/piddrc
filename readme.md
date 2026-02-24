@@ -1,65 +1,132 @@
-# Dual-Readout Calorimeter Deep Learning Toolkit
+# Dual-Readout Calorimeter PID Toolkit
 
-This repository provides reusable building blocks to study particle
-identification (PID) and energy reconstruction with dual-readout
-calorimeter simulations.  The code is intentionally modular so that you
-can experiment with different model families (MLP, masked point-set and
-Mamba-inspired networks) on both simulated and test-beam data.
+A PyTorch research toolkit for **particle identification (PID)** and **energy regression** on dual-readout calorimeter events stored in HDF5.
 
-## Key Components
+It provides:
+- A reusable dataset layer for variable-length hit clouds.
+- Multiple point-set backbones (MLP, Transformer, Mamba, graph, Point Transformer v3, MLP++).
+- A multi-task training engine for classification + regression (with optional uncertainty and direction heads).
+- A CLI (`run.py`) for training, evaluation, checkpointing, and metrics export.
 
-| Module | Description |
-| --- | --- |
-| `pid.data` | HDF5 dataset loader with on-the-fly feature engineering and collate function for variable-length showers. |
-| `pid.models.mlp.SummaryMLP` | Simple baseline operating on engineered scintillation/Cherenkov summary statistics. |
-| `pid.models.pointset_mlp.PointSetMLP` | Lightweight masked point-set MLP with shared backbone and multi-task (PID + energy) head. |
-| `pid.models.pointset_mlppp.PointSetMLPpp` | Deeper PointMLP++-style network with adaptive feature normalization and optional geometric modulation. |
-| `pid.models.poinset_graph.PointSetGraphNet` | DGCNN-inspired graph network with static/dynamic kNN message passing over hit coordinates. |
-| `pid.models.pointset_transformer.PointSetTransformer` | Global transformer encoder for masked point sets with summary-aware pooling head. |
-| `pid.models.pointset_ptv3.PointSetTransformerV3` | Point Transformer v3 style local-attention encoder requiring per-hit coordinates. |
-| `pid.models.pointset_mamba.PointSetMamba` | Sequence model using gated residual mixing blocks inspired by Mamba. |
-| `pid.engine.Trainer` | End-to-end training loop with mixed-precision support and research-grade metrics (accuracy, ROC-AUC, energy resolution/linearity). |
+---
 
-All models produce three outputs:
+## Repository layout
 
-1. Classification logits for PID tasks.
-2. Energy regression prediction.
-3. Optional log-variance head to capture aleatoric uncertainty.
+```text
+.
+├── pid/
+│   ├── data.py                 # Dataset + collate utilities
+│   ├── engine.py               # Trainer + TrainingConfig
+│   ├── metrics.py              # Task metrics
+│   └── models/                 # Model backbones and shared heads
+├── run.py                      # Main train/eval CLI
+├── compute_stats.py            # Compute feature statistics from HDF5
+├── toh5.py                     # Convert ROOT-style inputs to HDF5
+├── submit.py                   # Batch/sweep launcher
+├── plot_*.py                   # Plotting/evaluation helper scripts
+└── tests/                      # Pytest suite
+```
 
-## Quick Start
+---
 
-### 1. Install dependencies
-
-Install the core Python dependencies into your environment using the
-provided requirements file:
+## Installation
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Prepare input datasets
+---
 
-The toolkit expects HDF5 files where each entry represents a calorimeter
-event.  You can use the helper script `toh5.py` to convert raw ROOT files
-into the expected format:
+## Data expectations
+
+The training pipeline expects HDF5 files containing:
+- **Per-hit features** (e.g., amplitude, type, timing, xyz coordinates).
+- **Event-level labels** for class targets (`--label_key`, default `GenParticles.PDG`).
+- **Event-level regression targets** for energy (`--energy_key`, default `E_gen`).
+
+Default hit features in `run.py` are:
+- `DRcalo3dHits.amplitude_sum`
+- `DRcalo3dHits.type`
+- `DRcalo3dHits.time`
+- `DRcalo3dHits.time_end`
+- `DRcalo3dHits.position.x`
+- `DRcalo3dHits.position.y`
+- `DRcalo3dHits.position.z`
+
+If your schema differs, pass custom `--hit_features`, `--pos_keys`, `--label_key`, and `--energy_key`.
+
+---
+
+## Quick start (CLI)
+
+### 1) Compute normalization statistics
 
 ```bash
-python toh5.py --input path/to/tree.root --output electrons.h5
+python compute_stats.py \
+  --data_dir /path/to/h5s \
+  --files train_electron train_pion \
+  --output stats.yaml
 ```
 
-Repeat this conversion for every particle type that you would like to
-include in the training sample.  When working with large data volumes it
-is often convenient to shard the converted output into multiple files so
-that they can be streamed efficiently from disk.
+### 2) Train a model
 
-### 3. Create a dataset object
+```bash
+python run.py \
+  --train_files train_electron.h5 train_pion.h5 \
+  --val_files val_electron.h5 val_pion.h5 \
+  --stat_file stats.yaml \
+  --model mamba \
+  --epochs 50 \
+  --batch_size 64 \
+  --learning_rate 3e-4 \
+  --name exp_mamba
+```
+
+Artifacts are written under `save/<name>/` by default:
+- `checkpoint.pt`
+- `history.json`
+- `metrics.json`
+- `config.json`
+- `output.json` (test-set per-event outputs)
+
+### 3) Evaluate only
+
+```bash
+python run.py \
+  --eval_only \
+  --checkpoint save/exp_mamba/checkpoint.pt \
+  --test_files test_electron.h5 test_pion.h5 \
+  --stat_file stats.yaml \
+  --name exp_mamba_eval
+```
+
+---
+
+## Supported models
+
+Select with `--model`:
+- `mlp`
+- `transformer`
+- `mamba`
+- `graph`
+- `ptv3`
+- `mlppp`
+- `mamba2` (alias to current Mamba implementation)
+
+---
+
+## Python API usage
 
 ```python
 from torch.utils.data import DataLoader
-from pid.data import DualReadoutEventDataset, collate_events
+from pid import DualReadoutEventDataset, Trainer, TrainingConfig, collate_events
+from pid.models.pointset_mamba import PointSetMamba
+import torch
 
 dataset = DualReadoutEventDataset(
-    files=["/path/to/electrons.h5", "/path/to/pions.h5"],
+    files=["train_electron.h5", "train_pion.h5"],
     hit_features=(
         "DRcalo3dHits.amplitude_sum",
         "DRcalo3dHits.type",
@@ -69,107 +136,63 @@ dataset = DualReadoutEventDataset(
         "DRcalo3dHits.position.y",
         "DRcalo3dHits.position.z",
     ),
-    label_key="particle_type",
-    energy_key="true_energy",
-    stat_file="/path/to/stats.yaml",
-    max_points=2048,
+    label_key="GenParticles.PDG",
+    energy_key="E_gen",
+    stat_file="stats.yaml",
 )
 
-loader = DataLoader(dataset, batch_size=32, collate_fn=collate_events, shuffle=True)
-```
-
-The feature list above mirrors the defaults exposed by the command-line
-interface in `run.py`, giving you the total amplitude, channel type,
-timing window and 3D coordinates for each hit. You can extend or
-reorder the tuple to match the contents of your HDF5 files as long as
-the accompanying statistics file contains matching entries.
-
-### 4. Instantiate a model and trainer
-
-```python
-import torch
-from pid.engine import Trainer, TrainingConfig
-from pid.models.pointset_mlp import PointSetMLP
+loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_events)
 
 sample = dataset[0]
-model = PointSetMLP(
-    in_channels=len(dataset.hit_features),
+model = PointSetMamba(
+    in_channels=sample.points.shape[-1],
     summary_dim=sample.summary.numel(),
     num_classes=len(dataset.classes),
 )
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-trainer = Trainer(model, optimizer, device=torch.device("cuda"))
+trainer = Trainer(model=model, optimizer=optimizer, device=torch.device("cuda"))
 trainer.fit(loader)
 ```
 
-### 5. Train and evaluate from the command line
+---
 
-For longer training runs you can use the high level CLI.  The entry point
-`run.py` mirrors the steps above while adding logging, checkpointing and
-TensorBoard integration:
+## Analysis and plotting helpers
 
-```bash
-python run.py \
-  --train electron.h5 pion.h5 \
-  --val val_electron.h5 val_pion.h5 \
-  --model pointset_mlp \
-  --epochs 100 \
-  --batch_size 64 \
-  --lr 3e-4
-```
+In addition to the training/evaluation CLI, this repository ships helper scripts for post-training inspection and report figures:
 
-Checkpoints are written to the directory specified via `--output_dir` and
-can later be restored with the `--resume` flag.  After training finishes
-you can run the evaluation loop only by appending `--eval_only`.
+- `plot_performance.py`: plot model-level metrics such as PID and energy-regression performance from saved outputs/checkpoints.
+- `plot_eval_across_n.py`: compare evaluation metrics across different event-count or sampling configurations (`n`).
+- `eval_checkpoint_across_n.py`: run checkpoint evaluation repeatedly across multiple `n` settings and save aggregated results.
+- `plot_shower_properties.py`: visualize hit/shower-level distributions (spatial, timing, and amplitude-derived views).
+- `analyze_cutoff_readouts.py`: inspect readout truncation/cutoff behavior and its impact on retained signal content.
+- `check_point_order.py`: quick sanity check utility for ordering/consistency of point-wise arrays in prepared files.
 
-### 6. Evaluate in Python
+A typical workflow is:
+1. Train with `run.py` and save artifacts under `save/<name>/`.
+2. Run evaluation scripts to produce aggregate JSON/CSV summaries.
+3. Use plotting scripts to generate figures for debugging, comparisons, and reports.
 
-Use `trainer.evaluate(test_loader)` to obtain a summary of PID and energy
-metrics in interactive notebooks or scripts.
-
-### 7. Reproduce paper results
-
-To replicate the configurations used in the accompanying paper or note,
-inspect the experiment YAML files under `pid/config/experiments/`.  Each
-file specifies the model family, optimizer schedule and data sources used
-in our benchmarks.  The provided `submit.py` script reads these configs
-and orchestrates multi-job sweeps across different random seeds.
-
-### Inspecting model architectures
-
-The training script can print a [`torchinfo`](https://github.com/tyleryep/torchinfo)
-overview of the selected architecture using a representative batch drawn
-from the training data. Enable it via the `--print_model_summary` flag:
-
-```bash
-python run.py --print_model_summary --eval_only --checkpoint path/to/checkpoint.pt
-```
-
-This is a convenient way to verify tensor shapes and parameter counts
-before launching long training runs.
+---
 
 ## Testing
 
-A lightweight unit test suite is available to validate the full training
-loop on synthetic data:
+Run the test suite:
 
 ```bash
 pytest
 ```
 
-This exercises the data loader, models and trainer to guard against
-regressions.
+Or run a subset while iterating:
 
-## Project structure
-
-```
-.
-├── compute_channel_stats.py   # Utility for aggregating per-channel hit statistics
-├── pid/                       # Core library code: data, models and engine modules
-├── run.py                     # Training/evaluation CLI entry point
-├── submit.py                  # Experiment launcher for sweeps across configs and seeds
-├── tests/                     # Pytest-based regression suite
-└── toh5.py                    # ROOT → HDF5 converter used during data preparation
+```bash
+pytest tests/test_data.py -q
 ```
 
+---
+
+## Notes
+
+- Use `--pool > 1` to switch feature paths from `DRcalo3dHits.*` to pooled variants (`DRcalo3dHits{pool}.*`).
+- Use `--enable_direction_regression` with `--direction_keys` to add angular target regression.
+- Use `--compile` (PyTorch 2+) and `--use_amp` for performance-oriented runs.

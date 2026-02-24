@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-from unittest.mock import patch
 
 import h5py
 import numpy as np
 import pytest
+import compute_stats as compute_stats_module
 from compute_stats import (
     DEFAULT_DATASETS,
     DEFAULT_DIR,
@@ -18,6 +18,12 @@ from compute_stats import (
     compute_stats,
     scan_files,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_tqdm(monkeypatch):
+    """Disable tqdm in tests to avoid non-TTY progress-bar hangs in CI."""
+    monkeypatch.setattr(compute_stats_module, "tqdm", None)
 
 
 def test_parse_args_populates_defaults():
@@ -74,3 +80,15 @@ def test_scan_files_computes_statistics(tmp_path):
     expected_quantiles = np.quantile(flat, quantiles)
     for quantile, expected in zip(quantiles, expected_quantiles):
         assert math.isclose(result["percentiles"][quantile], float(expected), rel_tol=1e-6)
+
+
+def test_scan_files_raises_when_key_and_dataset_names_are_both_provided(tmp_path):
+    with pytest.raises(ValueError, match="either 'key' or 'dataset_names'"):
+        scan_files(
+            data_dir=str(tmp_path),
+            file_names=["sample"],
+            dataset_names=["C_amp"],
+            key="C_amp",
+            sample_size=10,
+            percentiles=(0.5,),
+        )
