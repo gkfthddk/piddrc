@@ -162,6 +162,25 @@ class H5FileProcessor:
         self.compute_stats = compute_stats
         self.stats_kwargs = {"sample_size": stats_sample_size, "percentiles": stats_percentiles}
 
+    def _write_invalid_file_reports(
+        self,
+        sample_name: str,
+        no_valid_entry_files: List[str],
+    ) -> None:
+        """Write text report for invalid reco files."""
+        if not no_valid_entry_files:
+            return
+
+        report_dir = self.output_dir / "invalid_lists"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        reco_report = report_dir / f"{sample_name}_invalid_reco.txt"
+
+        reco_paths = [Path(p) for p in sorted(no_valid_entry_files)]
+        reco_report.write_text("\n".join(str(p) for p in reco_paths) + "\n")
+
+        logger.info("Saved invalid reco list: %s", reco_report)
+
     def _build_write_keys(self) -> List[str]:
         """Generates the list of all dataset keys to be written."""
         keys = list(self._BASE_CHANNELS) # Start with a copy of base channels
@@ -231,7 +250,14 @@ class H5FileProcessor:
                 queue.put((file_name, data_dict, "ok"))
         #logger.info(f"Reader worker finished for {len(file_list)} files.")
 
-    def _writer_worker(self, queue: multiprocessing.Queue, output_file: Path, total_files_to_process: int, stats_dict_proxy: Dict):
+    def _writer_worker(
+        self,
+        queue: multiprocessing.Queue,
+        output_file: Path,
+        total_files_to_process: int,
+        stats_dict_proxy: Dict,
+        sample_name: str,
+    ):
         """Worker process to write data from the queue to the output HDF5 file."""
         logger.info(f"Writer worker started for {output_file}")
         processed_files_count = 0
@@ -296,6 +322,7 @@ class H5FileProcessor:
                 len(no_valid_entry_files),
                 ", ".join(no_valid_entry_files),
             )
+            self._write_invalid_file_reports(sample_name, no_valid_entry_files)
 
         logger.info(f"Writer worker finished for {output_file}")
         print_memory_usage('Writer end')
@@ -308,40 +335,163 @@ class H5FileProcessor:
         with h5py.File(output_file, 'a') as f: # Open in append mode to add attributes
             f.attrs['statistics'] = json.dumps(stats, allow_nan=True)
     @staticmethod
-    def _check_reco_file(file_name: Path) -> Tuple[Optional[Path], Optional[int]]:
+    def _check_reco_file(file_name: Path) -> Tuple[Optional[Path], Optional[int], str]:
         """
         Checks if an HDF5 file exists, is readable, and contains the VERSION key.
         Returns the file path and number of entries if valid, otherwise None.
         """
         if not file_name.is_file():
-            return None, None
+            return None, None, "missing_file"
         try:
             with h5py.File(file_name, 'r') as hf:
                 keys = list(hf.keys())
                 if VERSION in keys and 'seed' in keys: # Ensure 'seed' exists to get entries
                     entries = len(hf['seed'])
-                    return file_name, entries
+                    return file_name, entries, "ok"
                 else:
                     logger.warning(f"File {file_name} is missing '{VERSION}' or 'seed' key. Skipping.")
-                    return None, None
+                    return None, None, "missing_required_keys"
         except Exception as e:
             logger.error(f"Error opening or reading {file_name}: {e}")
-            return None, None
+            return None, None, "open_error"
 
-    def process_sample(self, sample_name: str, max_num_files: int = 0, num_reader_processes: int = 4, overwrite: bool = False):
+    @staticmethod
+    def _check_reco_file_strict(file_name: Path) -> Dict[str, Any]:
+        """
+        Strict validation for check-only mode.
+        A file is:
+        - unreadable: cannot open/read required datasets
+        - readable_but_invalid: readable and all entries are invalid
+        - readable_mixed: readable and contains both valid and invalid entries
+        - readable_valid: readable and every entry is valid
+        """
+        record: Dict[str, Any] = {
+            "file": str(file_name),
+            "status": "unreadable",
+            "reason": "",
+            "total_entries": 0,
+            "valid_entries": 0,
+            "invalid_entries": 0,
+            "invalid_fraction": None,
+        }
+
+        if not file_name.is_file():
+            record["reason"] = "missing_file"
+            return record
+
+        try:
+            with h5py.File(file_name, 'r') as hf:
+                required = [VERSION, 'seed', 'S_amp', 'C_amp']
+                missing = [k for k in required if k not in hf]
+                if missing:
+                    record["reason"] = f"missing_required_keys:{','.join(missing)}"
+                    return record
+
+                s_amp = hf['S_amp'][:]
+                c_amp = hf['C_amp'][:]
+                if s_amp.ndim > 1:
+                    s_amp = s_amp.reshape(-1)
+                if c_amp.ndim > 1:
+                    c_amp = c_amp.reshape(-1)
+
+                if s_amp.shape[0] != c_amp.shape[0]:
+                    record["reason"] = "shape_mismatch_S_amp_C_amp"
+                    return record
+
+                total = int(s_amp.shape[0])
+                valid_mask = (s_amp != 0) & (s_amp <= 2e8) & (c_amp != 0) & (c_amp <= 2e8)
+                valid = int(np.sum(valid_mask))
+                invalid = int(total - valid)
+
+                record["total_entries"] = total
+                record["valid_entries"] = valid
+                record["invalid_entries"] = invalid
+                record["invalid_fraction"] = (float(invalid / total) if total > 0 else None)
+
+                if total == 0:
+                    record["status"] = "readable_but_invalid"
+                    record["reason"] = "zero_entries"
+                elif valid == 0:
+                    record["status"] = "readable_but_invalid"
+                    record["reason"] = "all_entries_invalid"
+                elif invalid == 0:
+                    record["status"] = "readable_valid"
+                    record["reason"] = "all_entries_valid"
+                else:
+                    record["status"] = "readable_mixed"
+                    record["reason"] = "contains_valid_and_invalid_entries"
+                return record
+        except Exception as e:
+            record["reason"] = f"open_error:{e}"
+            return record
+
+    def _write_validation_reports(
+        self,
+        sample_name: str,
+        valid_files: List[Path],
+        readable_but_invalid_files: List[Path],
+        readable_mixed_files: List[Path],
+        unreadable_files: List[Path],
+        total_entries: int,
+        strict_records: List[Dict[str, Any]],
+    ) -> None:
+        """Writes strict validation summary and categorized file lists."""
+        report_dir = self.output_dir / "validation_reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        valid_report = report_dir / f"{sample_name}_readable_valid_reco.txt"
+        readable_invalid_report = report_dir / f"{sample_name}_readable_but_invalid_reco.txt"
+        readable_mixed_report = report_dir / f"{sample_name}_readable_mixed_reco.txt"
+        unreadable_report = report_dir / f"{sample_name}_unreadable_reco.txt"
+        # Backward-compatible alias for existing downstream scripts.
+        invalid_alias_report = report_dir / f"{sample_name}_invalid_reco.txt"
+        summary_report = report_dir / f"{sample_name}_validation_summary.json"
+
+        valid_report.write_text("\n".join(str(p) for p in sorted(valid_files)) + ("\n" if valid_files else ""))
+        readable_invalid_report.write_text(
+            "\n".join(str(p) for p in sorted(readable_but_invalid_files)) + ("\n" if readable_but_invalid_files else "")
+        )
+        readable_mixed_report.write_text(
+            "\n".join(str(p) for p in sorted(readable_mixed_files)) + ("\n" if readable_mixed_files else "")
+        )
+        unreadable_report.write_text("\n".join(str(p) for p in sorted(unreadable_files)) + ("\n" if unreadable_files else ""))
+        invalid_alias_report.write_text(
+            "\n".join(str(p) for p in sorted(readable_but_invalid_files + readable_mixed_files + unreadable_files))
+            + ("\n" if (readable_but_invalid_files or readable_mixed_files or unreadable_files) else "")
+        )
+        summary_report.write_text(
+            json.dumps(
+                {
+                    "sample_name": sample_name,
+                    "readable_valid_files": len(valid_files),
+                    "readable_but_invalid_files": len(readable_but_invalid_files),
+                    "readable_mixed_files": len(readable_mixed_files),
+                    "unreadable_files": len(unreadable_files),
+                    "invalid_files_total": len(readable_but_invalid_files) + len(readable_mixed_files) + len(unreadable_files),
+                    "total_entries": int(total_entries),
+                    "files": strict_records,
+                },
+                indent=2,
+            )
+        )
+        logger.info("Saved validation reports in %s", report_dir)
+
+    def process_sample(
+        self,
+        sample_name: str,
+        max_num_files: int = 0,
+        num_reader_processes: int = 4,
+        overwrite: bool = False,
+        check_only: bool = False,
+    ):
         """
         Processes a single sample by merging multiple HDF5 files into one.
         """
         output_file = self.output_dir / f"{sample_name}.h5py"
-        logger.info(f"Processing sample '{sample_name}', output to: {output_file}")
-
-        # Initialize output file (create if not exists, clear if exists)
-        if output_file.exists() and not overwrite:
-            logger.warning(f"Output file {output_file} already exists and overwrite is False. Skipping.")
-            return
-
-        with h5py.File(output_file, 'w') as f:
-            pass # Just creates/truncates the file
+        if check_only:
+            logger.info(f"Checking sample '{sample_name}' (check-only mode, merge output disabled)")
+        else:
+            logger.info(f"Processing sample '{sample_name}', output to: {output_file}")
 
         sample_reco_dir = self.reco_path / sample_name
         if not sample_reco_dir.is_dir():
@@ -357,6 +507,51 @@ class H5FileProcessor:
         valid_files: List[Path] = []
         total_entries = 0
 
+        if check_only:
+            strict_records: List[Dict[str, Any]] = []
+            with multiprocessing.Pool(processes=num_reader_processes) as pool:
+                results = []
+                for recopath in reco_list:
+                    results.append(pool.apply_async(self._check_reco_file_strict, args=(recopath,)))
+
+                for result in tqdm.tqdm(results, desc="Strict validation (entry-level)", leave=False):
+                    rec = result.get()
+                    strict_records.append(rec)
+
+            readable_but_invalid_files = [
+                Path(rec["file"]) for rec in strict_records if rec.get("status") == "readable_but_invalid"
+            ]
+            readable_mixed_files = [
+                Path(rec["file"]) for rec in strict_records if rec.get("status") == "readable_mixed"
+            ]
+            unreadable_files = [
+                Path(rec["file"]) for rec in strict_records if rec.get("status") == "unreadable"
+            ]
+            valid_files = [
+                Path(rec["file"]) for rec in strict_records if rec.get("status") == "readable_valid"
+            ]
+            total_entries = int(sum(int(rec.get("total_entries", 0) or 0) for rec in strict_records))
+
+            logger.info(
+                "Check-only summary for '%s': readable_valid=%d readable_but_invalid=%d readable_mixed=%d unreadable=%d total_entries=%d",
+                sample_name,
+                len(valid_files),
+                len(readable_but_invalid_files),
+                len(readable_mixed_files),
+                len(unreadable_files),
+                total_entries,
+            )
+            self._write_validation_reports(
+                sample_name=sample_name,
+                valid_files=valid_files,
+                readable_but_invalid_files=readable_but_invalid_files,
+                readable_mixed_files=readable_mixed_files,
+                unreadable_files=unreadable_files,
+                total_entries=total_entries,
+                strict_records=strict_records,
+            )
+            return
+
         # Use multiprocessing Pool to check files in parallel
         with multiprocessing.Pool(processes=num_reader_processes) as pool:
             results = []
@@ -364,17 +559,28 @@ class H5FileProcessor:
                 results.append(pool.apply_async(self._check_reco_file, args=(recopath,)))
 
             for result in tqdm.tqdm(results, desc="Validating reco files", leave=False):
-                file_name, entry_count = result.get()
+                file_name, entry_count, status = result.get()
                 if file_name:
                     valid_files.append(file_name)
+                else:
+                    if status != "ok":
+                        # The candidate path is known from reco_list; map by result order would be fragile,
+                        # so append via status only when invalid path is available.
+                        pass
                 if entry_count:
                     total_entries += entry_count
-
         logger.info(f"Validated {len(valid_files)} files with a total of {total_entries} entries for '{sample_name}'.")
 
         if not valid_files:
             logger.error(f"No valid reco files found for sample '{sample_name}'. Skipping merge.")
             return
+
+        # Initialize output file (create if not exists, clear if exists)
+        if output_file.exists() and not overwrite:
+            logger.warning(f"Output file {output_file} already exists and overwrite is False. Skipping.")
+            return
+        with h5py.File(output_file, 'w') as f:
+            pass # Just creates/truncates the file
 
         # Setup multiprocessing for reading and writing
         print_memory_usage('Start merge')
@@ -399,7 +605,7 @@ class H5FileProcessor:
         # Start writer process
         writer_process = multiprocessing.Process(
             target=self._writer_worker,
-            args=(data_queue, output_file, len(valid_files), stats_dict_proxy)
+            args=(data_queue, output_file, len(valid_files), stats_dict_proxy, sample_name)
         )
         writer_process.start()
 
@@ -427,6 +633,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="h5s", help="Set output_h5_dir.")
     parser.add_argument("--compute_stats", action="store_true", help="Enable computation of channel statistics.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
+    parser.add_argument("--check_only", action="store_true", help="Only validate reco files; disable merged data writing.")
     args = parser.parse_args()
 
     reco_base_path = Path(args.reco_base)
@@ -435,7 +642,7 @@ def main():
     processor = H5FileProcessor(reco_base_path, output_h5_dir, compute_stats=args.compute_stats)
 
     # Example usage:
-    pids = ['pi+', 'pi0', 'gamma', 'e-']
+    pids = ['e-', 'pi+', 'pi0', 'gamma', 'kaon+']
     # pids = ['mu']
     # pids = ['e-','pi+','pi0','gamma','kaon+','proton','neutron','kaon0L']
 
@@ -447,7 +654,13 @@ def main():
                     sample_name = f"{pid}_{en}GeV"
                 else:
                     sample_name = f"{pid}_{en}GeV_{timing_size}"
-                processor.process_sample(sample_name, max_num_files=5000, num_reader_processes=8, overwrite=args.overwrite)
+                processor.process_sample(
+                    sample_name,
+                    max_num_files=5000,
+                    num_reader_processes=8,
+                    overwrite=args.overwrite,
+                    check_only=args.check_only,
+                )
 
                 gc.collect()
                 time.sleep(1)

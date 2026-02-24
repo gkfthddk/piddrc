@@ -28,6 +28,7 @@ ALIASES: Dict[str, str] = {
     "phi": "GenParticles.momentum.phi",
     "e_gen": "E_gen",
     "e_dep": "E_dep",
+    "e_leak": "E_leak",
     "s_amp": "S_amp",
     "c_amp": "C_amp",
 }
@@ -44,13 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--properties",
         nargs="+",
-        default=["theta", "phi", "e_gen", "e_dep", "S_amp", "C_amp"],
+        default=["theta", "phi", "e_gen", "e_dep", "e_leak", "S_amp", "C_amp"],
         help="Property names or raw HDF5 keys.",
     )
     parser.add_argument("--bins", type=int, default=120, help="Histogram bin count.")
-    parser.add_argument("--max-events", type=int, default=10000, help="Per-file event cap (<=0 means all).")
+    parser.add_argument("--max-events", type=int, default=20000, help="Per-file event cap (<=0 means all).")
     parser.add_argument("--out-dir", default="plots/shower_properties", help="Output directory.")
     parser.add_argument("--density", action="store_true", help="Normalize histograms to density.")
+    parser.add_argument(
+        "--skip-scatter",
+        action="store_true",
+        help="Skip theta-vs-energy scatter plots (faster for large inputs).",
+    )
     parser.add_argument(
         "--mask-feature",
         default="DRcalo3dHits.amplitude_sum",
@@ -60,7 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--max-point-sweep",
         nargs="+",
         type=int,
-        default=[500, 1000, 1500, 2000, 3000],
+        default=[1000, 3000, 5000, 10000],
         help="Cutoffs used for unique-readout vs max-point curve.",
     )
     parser.add_argument(
@@ -120,29 +126,6 @@ def _read_1d(handle: h5py.File, key: str, max_events: int) -> np.ndarray:
     return arr[np.isfinite(arr)]
 
 
-def _read_unique_readout_counts(handle: h5py.File, cell_key: str, max_events: int) -> np.ndarray:
-    if cell_key not in handle:
-        return np.array([], dtype=np.float64)
-    ds = handle[cell_key]
-    if ds.ndim == 0:
-        return np.array([], dtype=np.float64)
-    n_events = ds.shape[0]
-    take = n_events if max_events <= 0 else min(n_events, max_events)
-    cells = np.asarray(ds[:take])
-    if cells.ndim == 1:
-        cells = cells.reshape(-1, 1)
-
-    counts = np.zeros(cells.shape[0], dtype=np.float64)
-    for i in range(cells.shape[0]):
-        row = np.asarray(cells[i]).reshape(-1)
-        valid = np.isfinite(row) & (row != 0)
-        if not np.any(valid):
-            counts[i] = 0.0
-        else:
-            counts[i] = float(np.unique(row[valid]).size)
-    return counts
-
-
 def _read_effective_readout_metrics(
     handle: h5py.File,
     *,
@@ -181,6 +164,7 @@ def _read_effective_readout_metrics(
 
     n_cut = len(cutoffs)
     effective_points = np.zeros(take, dtype=np.float64)
+    unique_raw = np.zeros(take, dtype=np.float64)
     unique_full = np.zeros(take, dtype=np.float64)
     ratio = np.full(take, np.nan, dtype=np.float64)
     unique_vs_cutoff = np.zeros((take, n_cut), dtype=np.float64)
@@ -188,7 +172,9 @@ def _read_effective_readout_metrics(
 
     for i in range(take):
         row_cell = np.asarray(cells[i]).reshape(-1)
-        valid = np.isfinite(row_cell) & (row_cell != 0)
+        raw_valid = np.isfinite(row_cell) & (row_cell != 0)
+        unique_raw[i] = float(np.unique(row_cell[raw_valid]).size) if np.any(raw_valid) else 0.0
+        valid = raw_valid
         if mask_arr is not None and mask_arr.shape[1] == row_cell.shape[0]:
             row_mask = np.asarray(mask_arr[i]).reshape(-1)
             valid = valid & np.isfinite(row_mask) & (row_mask != 0)
@@ -216,6 +202,7 @@ def _read_effective_readout_metrics(
                     energy_frac_vs_cutoff[i, j] = float(np.sum(kept_e) / total_energy)
 
     out: Dict[str, np.ndarray] = {
+        "num_unique_readout": unique_raw,
         "effective_points": effective_points,
         "num_unique_readout_effective": unique_full,
         "effective_points_per_unique_readout": ratio[np.isfinite(ratio)],
@@ -261,6 +248,9 @@ def _collect(
         file_data: Dict[str, np.ndarray] = {}
         with h5py.File(path, "r") as handle:
             for key in tqdm(keys, desc=f"  {path.name} vars", leave=False):
+                # Cell-level diagnostics are handled in one dedicated pass below.
+                if key == "DRcalo3dHits.cellID":
+                    continue
                 if key not in handle:
                     continue
                 values = _read_1d(handle, key, max_events)
@@ -281,10 +271,6 @@ def _collect(
                     file_data["E_dep_over_E_gen"] = ratio
                     by_key_total.setdefault("E_dep_over_E_gen", []).append(ratio)
 
-            unique_readout = _read_unique_readout_counts(handle, "DRcalo3dHits.cellID", max_events)
-            if unique_readout.size > 0:
-                file_data["num_unique_readout"] = unique_readout
-                by_key_total.setdefault("num_unique_readout", []).append(unique_readout)
             extra = _read_effective_readout_metrics(
                 handle,
                 cell_key="DRcalo3dHits.cellID",
@@ -372,6 +358,8 @@ def _plot(total: Dict[str, np.ndarray], by_file: Dict[str, Dict[str, np.ndarray]
         ax.set_xlabel(key)
         ax.set_ylabel("density" if density else "count")
         ax.set_title(f"Distribution: {key}")
+        if key == "E_leak":
+            ax.set_yscale("log", nonpositive="clip")
         ax.grid(True, linestyle="--", alpha=0.3)
         ax.legend(fontsize=8)
         fig.tight_layout()
@@ -528,14 +516,15 @@ def main() -> None:
         raise SystemExit("No input files matched.")
 
     keys = [_canonical_key(p) for p in args.properties]
-    for required in ("GenParticles.momentum.theta", "E_dep", "E_gen", "E_leak", "DRcalo3dHits.cellID"):
+    for required in ("GenParticles.momentum.theta", "E_dep", "E_gen", "E_leak"):
         if required not in keys:
             keys.append(required)
     sweep = sorted({n for n in args.max_point_sweep if n > 0})
     total, by_file = _collect(files, keys, args.max_events, args.mask_feature, args.energy_feature, sweep)
     out_dir = Path(args.out_dir)
     _plot(total, by_file, out_dir, args.bins, args.density)
-    _plot_theta_energy_scatter(by_file, out_dir)
+    if not args.skip_scatter:
+        _plot_theta_energy_scatter(by_file, out_dir)
     _plot_effective_points_per_unique_readout_avg(by_file, out_dir)
     _plot_unique_readout_vs_max_points(by_file, out_dir, sweep)
     _plot_energy_fraction_vs_max_points(by_file, out_dir, sweep)
