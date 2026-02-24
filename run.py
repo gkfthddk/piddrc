@@ -553,8 +553,6 @@ def build_datasets(
     balance_train_files = getattr(args, "balance_train_files", False)
     train_limit = getattr(args, "train_limit", None)
     progress = getattr(args, "dataset_progress", True)
-    direction_enabled = getattr(args, "enable_direction_regression", False)
-    direction_keys = getattr(args, "direction_keys", ()) if direction_enabled else None
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
@@ -566,7 +564,7 @@ def build_datasets(
         pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
-        direction_keys=direction_keys,
+        direction_keys=args.direction_keys if args.enable_direction_regression else None,
         stat_file=args.stat_file,
         max_points=args.max_points,
         pool=pool,
@@ -585,7 +583,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
-            direction_keys=direction_keys,
+            direction_keys=args.direction_keys if args.enable_direction_regression else None,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -603,7 +601,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
-            direction_keys=direction_keys,
+            direction_keys=args.direction_keys if args.enable_direction_regression else None,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -692,8 +690,8 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
         "dropout": args.dropout,
         "use_summary": not args.disable_summary,
         "use_uncertainty": not args.disable_uncertainty,
-        "use_direction": getattr(args, "enable_direction_regression", False),
-        "direction_dim": len(getattr(args, "direction_keys", ())),
+        "use_direction": args.enable_direction_regression,
+        "direction_dim": len(args.direction_keys),
     }
 
     if model_name == "mlp":

@@ -417,18 +417,9 @@ class DualReadoutEventDataset(Dataset):
     def _get_chunk(self, handle: h5py.File, chunk_start: int) -> Mapping[str, Any]:
         start = chunk_start
         stop = min(start + self.cache_size, len(handle[self.label_key]))
-        hits = [
-            np.asarray(handle[feature][start:stop, : self.max_points] / self.feature_max[feature], dtype=np.float32)
-            for feature in self.hit_features
-        ]
+        hits = [np.asarray(handle[feature][start:stop,:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
+        cid=handle[self.cid_key][start:stop,:self.max_points]
         points = np.stack(hits, axis=-1)
-        if self.cid_key in handle:
-            cid = np.asarray(handle[self.cid_key][start:stop, : self.max_points])
-        else:
-            # Some datasets do not ship explicit cell ids. Provide a deterministic
-            # fallback so loading continues instead of repeatedly retrying chunks.
-            num_hits = points.shape[1] if points.ndim >= 2 else 0
-            cid = np.broadcast_to(np.arange(num_hits, dtype=np.int64), (points.shape[0], num_hits)).copy()
 
         def _read_optional(dataset_name: str) -> float:
             if dataset_name not in handle:
