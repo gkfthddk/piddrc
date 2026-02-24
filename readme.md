@@ -145,6 +145,24 @@ trainer.fit(loader)
 
 ---
 
+## Analysis and plotting helpers
+
+In addition to the training/evaluation CLI, this repository ships helper scripts for post-training inspection and report figures:
+
+- `plot_performance.py`: plot model-level metrics such as PID and energy-regression performance from saved outputs/checkpoints.
+- `plot_eval_across_n.py`: compare evaluation metrics across different event-count or sampling configurations (`n`).
+- `eval_checkpoint_across_n.py`: run checkpoint evaluation repeatedly across multiple `n` settings and save aggregated results.
+- `plot_shower_properties.py`: visualize hit/shower-level distributions (spatial, timing, and amplitude-derived views).
+- `analyze_cutoff_readouts.py`: inspect readout truncation/cutoff behavior and its impact on retained signal content.
+- `check_point_order.py`: quick sanity check utility for ordering/consistency of point-wise arrays in prepared files.
+
+A typical workflow is:
+1. Train with `run.py` and save artifacts under `save/<name>/`.
+2. Run evaluation scripts to produce aggregate JSON/CSV summaries.
+3. Use plotting scripts to generate figures for debugging, comparisons, and reports.
+
+---
+
 ## Testing
 
 Run the test suite:
