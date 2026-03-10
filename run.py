@@ -77,7 +77,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--train_files",
         type=Path,
         nargs="+",
-        default=("e-_1-100GeV_1.h5py", "gamma_1-100GeV_1.h5py", "pi0_1-100GeV_1.h5py", "pi+_1-100GeV_1.h5py"),
+        default=("e-_1-120GeV.h5py", "gamma_1-120GeV.h5py", "pi0_1-120GeV.h5py", "pi+_1-120GeV.h5py"),
         help="Paths to the training HDF5 files",
     )
     io_group.add_argument(
@@ -203,6 +203,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional per-file limit on the number of training events for quick tests",
     )
     io_group.add_argument(
+        "--cache_size",
+        type=int,
+        default=1024,
+        help="Number of events read per dataset cache chunk.",
+    )
+    io_group.add_argument(
+        "--max_cache_chunks",
+        type=int,
+        default=8,
+        help="Maximum cached chunks kept per worker. Use <=0 to disable the limit.",
+    )
+    io_group.add_argument(
         "--no_energy_adaptive_trim",
         dest="energy_adaptive_trim",
         action="store_false",
@@ -229,7 +241,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--trim_energy_max",
         type=float,
-        default=100.0,
+        default=120.0,
         help="Maximum energy scale (GeV) for adaptive trim mapping.",
     )
     io_group.add_argument(
@@ -309,6 +321,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     train_group = parser.add_argument_group("Optimisation")
     train_group.add_argument("--batch_size", type=int, default=64)
+    train_group.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=0,
+        help="Batch size for validation/test. Use <=0 to reuse --batch_size.",
+    )
     train_group.add_argument("--epochs", type=int, default=100)
     train_group.add_argument("--learning_rate", type=float, default=3e-4)
     train_group.add_argument("--weight_decay", type=float, default=1e-2)
@@ -328,7 +346,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Weight applied to the optional direction regression loss.",
     )
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
-    train_group.add_argument("--num_workers", type=int, default=8)
+    train_group.add_argument("--num_workers", type=int, default=4)
 
     misc_group = parser.add_argument_group("Misc")
     misc_group.add_argument(
@@ -416,6 +434,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="Freeze the uncertainty head (log_sigma) to zero for the first N epochs.",
+    )
+    misc_group.add_argument(
+        "--log_batch_lengths",
+        action="store_true",
+        help="Print per-epoch train/validation batch length statistics (padded and valid hits).",
+    )
+    misc_group.add_argument(
+        "--log_cuda_memory",
+        action="store_true",
+        help="Print CUDA memory allocation statistics during train/validation.",
+    )
+    misc_group.add_argument(
+        "--force_math_sdp",
+        action="store_true",
+        help="Force math SDPA backend (disable flash/mem-efficient SDPA) for consistent train/eval memory behavior.",
     )
     parser.set_defaults(dataset_progress=True, progress_bar=True)
 
@@ -508,15 +541,22 @@ def _split_dataset(
     generator = torch.Generator()
     generator.manual_seed(seed)
 
-    train_subset = Subset(dataset, list(range(train_len)))
-    val_subset = Subset(dataset, list(range(train_len, train_len + val_len))) if include_val else None
-    test_subset = Subset(dataset, list(range(train_len + val_len, total))) if include_test else None
-    
-    #subsets = random_split(dataset, lengths, generator=generator)
-    #subset_iter = iter(subsets)
-    #train_subset = next(subset_iter)
-    #val_subset = next(subset_iter) if include_val else None
-    #test_subset = next(subset_iter) if include_test else None
+    all_indices = torch.randperm(total, generator=generator).tolist()
+    train_indices_list = all_indices[:train_len]
+    cursor = train_len
+    val_indices_list = all_indices[cursor: cursor + val_len] if include_val else []
+    cursor += val_len
+    test_indices_list = all_indices[cursor: cursor + test_len] if include_test else []
+
+    # Keep random split membership, but preserve dataset order inside each split
+    # so cache-chunk locality in the base dataset is not destroyed by Subset order.
+    train_indices_list.sort()
+    val_indices_list.sort()
+    test_indices_list.sort()
+
+    train_subset = Subset(dataset, train_indices_list)
+    val_subset = Subset(dataset, val_indices_list) if include_val else None
+    test_subset = Subset(dataset, test_indices_list) if include_test else None
 
     def _indices_to_set(subset: Dataset[EventRecord] | None) -> set[int]:
         if subset is None:
@@ -553,6 +593,7 @@ def build_datasets(
     balance_train_files = getattr(args, "balance_train_files", False)
     train_limit = getattr(args, "train_limit", None)
     progress = getattr(args, "dataset_progress", True)
+    max_cache_chunks = None if getattr(args, "max_cache_chunks", 0) <= 0 else int(args.max_cache_chunks)
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
@@ -571,6 +612,8 @@ def build_datasets(
         balance_files=balance_train_files,
         max_events=train_limit,
         progress=progress,
+        cache_size=args.cache_size,
+        max_cache_chunks=max_cache_chunks,
     )
     print("  Training dataset ready", flush=True)
 
@@ -589,6 +632,8 @@ def build_datasets(
             pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
+            cache_size=args.cache_size,
+            max_cache_chunks=max_cache_chunks,
         )
         print("  Validation dataset ready", flush=True)
 
@@ -607,6 +652,8 @@ def build_datasets(
             pool=pool,
             class_names=base_dataset.classes,
             progress=progress,
+            cache_size=args.cache_size,
+            max_cache_chunks=max_cache_chunks,
         )
         print("  Test dataset ready", flush=True)
 
@@ -752,9 +799,11 @@ def build_dataloaders(
     test_dataset: Dataset[EventRecord] | None,
     *,
     batch_size: int,
+    eval_batch_size: int,
     num_workers: int,
     collate_fn: Any,
 ) -> Tuple[DataLoader, DataLoader | None, DataLoader | None]:
+    effective_eval_batch_size = batch_size if eval_batch_size <= 0 else eval_batch_size
     loader_kwargs = {
         "batch_size": batch_size,
         "collate_fn": collate_fn,
@@ -766,10 +815,18 @@ def build_dataloaders(
     train_loader = DataLoader(train_dataset, shuffle=False, **loader_kwargs)
     val_loader = None
     if val_dataset is not None:
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        val_loader = DataLoader(
+            val_dataset,
+            shuffle=False,
+            **{**loader_kwargs, "batch_size": effective_eval_batch_size},
+        )
     test_loader = None
     if test_dataset is not None:
-        test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+        test_loader = DataLoader(
+            test_dataset,
+            shuffle=False,
+            **{**loader_kwargs, "batch_size": effective_eval_batch_size},
+        )
     return train_loader, val_loader, test_loader
 
 
@@ -850,6 +907,8 @@ def configure_trainer(
     use_direction_regression: bool,
     profile: bool,
     profile_dir: Path | None,
+    log_batch_lengths: bool,
+    log_cuda_memory: bool,
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     config = TrainingConfig(
@@ -866,6 +925,8 @@ def configure_trainer(
         freeze_sigma=freeze_sigma,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
+        log_batch_lengths=log_batch_lengths,
+        log_cuda_memory=log_cuda_memory,
     )
 
     scheduler = None
@@ -946,6 +1007,14 @@ def main() -> None:
     maybe_save_config(args, args.config_json)
 
     device = torch.device(args.device)
+    if args.force_math_sdp and torch.cuda.is_available():
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_math_sdp"):
+            torch.backends.cuda.enable_math_sdp(True)
+        print("SDPA backend forced to math (flash/mem-efficient disabled).", flush=True)
 
     probe_dataset = DualReadoutEventDataset(
         [str(path) for path in args.train_files],
@@ -960,6 +1029,8 @@ def main() -> None:
         balance_files=getattr(args, "balance_train_files", False),
         max_events=1,
         progress=False,
+        cache_size=args.cache_size,
+        max_cache_chunks=None if args.max_cache_chunks <= 0 else int(args.max_cache_chunks),
     )
     trim_amp_feature_index = probe_dataset.feature_to_index.get(args.trim_amp_feature)
     if args.energy_adaptive_trim and trim_amp_feature_index is None:
@@ -1014,6 +1085,7 @@ def main() -> None:
         val_dataset,
         test_dataset,
         batch_size=args.batch_size,
+        eval_batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
         collate_fn=runtime_collate,
     )
@@ -1036,6 +1108,8 @@ def main() -> None:
         use_direction_regression=args.enable_direction_regression,
         profile=args.profile,
         profile_dir=args.profile_dir,
+        log_batch_lengths=args.log_batch_lengths,
+        log_cuda_memory=args.log_cuda_memory,
     )
 
     if args.checkpoint is not None and args.eval_only:

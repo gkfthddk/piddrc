@@ -35,6 +35,8 @@ class TrainingConfig:
     freeze_sigma: int = 0
     profile: bool = False
     profile_dir: str = "profile"
+    log_batch_lengths: bool = False
+    log_cuda_memory: bool = False
 
 
 class Trainer:
@@ -68,8 +70,12 @@ class Trainer:
             train_metrics = self._run_epoch(train_loader, training=True, epoch=epoch)
             history["train"].append(train_metrics)
             if val_loader is not None:
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
                 val_metrics = self._run_epoch(val_loader, training=False, epoch=epoch)
                 history["val"].append(val_metrics)
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
                 monitored_metrics = val_metrics
             else:
                 monitored_metrics = train_metrics
@@ -138,6 +144,7 @@ class Trainer:
             )
         else:
             iterator = data_loader
+        stream_metrics_only = (not training) and (not collect_outputs)
         losses: List[float] = []
         cls_losses: List[float] = []
         reg_losses: List[float] = []
@@ -153,13 +160,41 @@ class Trainer:
         event_id_list: List[torch.Tensor] = []
         sigma_values: List[float] = []
         direction_sigma_values: List[float] = []
+        stream_count = 0
+        stream_correct = 0
+        stream_sq_err = 0.0
+        stream_bias = 0.0
+        stream_rel_sum = 0.0
+        stream_rel_sq_sum = 0.0
+        stream_rel_count = 0
+        stream_x_sum = 0.0
+        stream_y_sum = 0.0
+        stream_xx_sum = 0.0
+        stream_xy_sum = 0.0
+        stream_dir_sq_err = 0.0
+        stream_dir_count = 0
+        stream_reg_sigma_sum = 0.0
+        stream_reg_sigma_count = 0
+        stream_dir_sigma_sum = 0.0
+        stream_dir_sigma_count = 0
+        padded_lengths: List[int] = []
+        valid_lengths_max: List[int] = []
+        valid_lengths_mean: List[float] = []
 
         autocast_enabled = self.scaler.is_enabled()
+        log_cuda_memory = self.config.log_cuda_memory and self.device.type == "cuda" and torch.cuda.is_available()
+        if log_cuda_memory:
+            torch.cuda.reset_peak_memory_stats(self.device)
 
         skipped_entries = 0
         check=0
         for step, batch in enumerate(iterator, start=1):
             batch = self._move_to_device(batch)
+            if self.config.log_batch_lengths and "points" in batch and "mask" in batch:
+                padded_lengths.append(int(batch["points"].shape[1]))
+                per_event_lengths = batch["mask"].sum(dim=1)
+                valid_lengths_max.append(int(per_event_lengths.max().item()))
+                valid_lengths_mean.append(float(per_event_lengths.float().mean().item()))
             grad_context = nullcontext() if training else torch.no_grad()
             skip_step = False
             effective_batch = batch
@@ -218,52 +253,146 @@ class Trainer:
             cls_losses.append(loss_cls.detach().item())
             reg_losses.append(loss_reg.detach().item())
             dir_losses.append(loss_dir.detach().item())
-            logits_list.append(outputs.logits.detach().cpu())
-            labels_list.append(effective_batch["labels"].detach().cpu())
-            energy_pred.append(outputs.energy.detach().cpu())
-            energy_true.append(effective_batch["energy"].detach().cpu())
-            if self.config.use_direction_regression and outputs.direction is not None and "direction" in effective_batch:
-                direction_pred.append(outputs.direction.detach().cpu())
-                direction_true.append(effective_batch["direction"].detach().cpu())
-            if collect_outputs and "event_id" in effective_batch:
-                event_id_list.append(effective_batch["event_id"].detach().cpu())
-            if outputs.log_sigma is not None:
-                log_sigma = outputs.log_sigma.detach()
-                log_sigma_list.append(log_sigma.cpu())
-                sigma_values.append(float(torch.exp(log_sigma).mean().item()))
-            if outputs.direction_log_sigma is not None:
-                direction_log_sigma = outputs.direction_log_sigma.detach()
-                direction_log_sigma_list.append(direction_log_sigma.cpu())
-                direction_sigma_values.append(float(torch.exp(direction_log_sigma).mean().item()))
+            if stream_metrics_only:
+                with torch.no_grad():
+                    logits_detached = outputs.logits.detach()
+                    labels_detached = effective_batch["labels"].detach()
+                    energy_p_detached = outputs.energy.detach()
+                    energy_t_detached = effective_batch["energy"].detach()
+
+                    stream_count += int(labels_detached.numel())
+                    stream_correct += int((logits_detached.argmax(dim=1) == labels_detached).sum().item())
+                    residual = energy_p_detached - energy_t_detached
+                    stream_sq_err += float((residual ** 2).sum().item())
+                    stream_bias += float(residual.sum().item())
+
+                    rel_mask = torch.abs(energy_t_detached) > 1e-6
+                    if rel_mask.any():
+                        rel = residual[rel_mask] / energy_t_detached[rel_mask]
+                        stream_rel_sum += float(rel.sum().item())
+                        stream_rel_sq_sum += float((rel ** 2).sum().item())
+                        stream_rel_count += int(rel.numel())
+
+                    x = energy_t_detached
+                    y = energy_p_detached
+                    stream_x_sum += float(x.sum().item())
+                    stream_y_sum += float(y.sum().item())
+                    stream_xx_sum += float((x * x).sum().item())
+                    stream_xy_sum += float((x * y).sum().item())
+
+                    if self.config.use_direction_regression and outputs.direction is not None and "direction" in effective_batch:
+                        d_residual = outputs.direction.detach() - effective_batch["direction"].detach()
+                        stream_dir_sq_err += float((d_residual ** 2).sum().item())
+                        stream_dir_count += int(d_residual.numel())
+
+                    if outputs.log_sigma is not None:
+                        stream_reg_sigma_sum += float(torch.exp(outputs.log_sigma.detach()).sum().item())
+                        stream_reg_sigma_count += int(outputs.log_sigma.numel())
+                    if outputs.direction_log_sigma is not None:
+                        direction_sigma = torch.exp(outputs.direction_log_sigma.detach())
+                        stream_dir_sigma_sum += float(direction_sigma.sum().item())
+                        stream_dir_sigma_count += int(direction_sigma.numel())
+            else:
+                logits_list.append(outputs.logits.detach().cpu())
+                labels_list.append(effective_batch["labels"].detach().cpu())
+                energy_pred.append(outputs.energy.detach().cpu())
+                energy_true.append(effective_batch["energy"].detach().cpu())
+                if self.config.use_direction_regression and outputs.direction is not None and "direction" in effective_batch:
+                    direction_pred.append(outputs.direction.detach().cpu())
+                    direction_true.append(effective_batch["direction"].detach().cpu())
+                if collect_outputs and "event_id" in effective_batch:
+                    event_id_list.append(effective_batch["event_id"].detach().cpu())
+                if outputs.log_sigma is not None:
+                    log_sigma = outputs.log_sigma.detach()
+                    log_sigma_list.append(log_sigma.cpu())
+                    sigma_values.append(float(torch.exp(log_sigma).mean().item()))
+                if outputs.direction_log_sigma is not None:
+                    direction_log_sigma = outputs.direction_log_sigma.detach()
+                    direction_log_sigma_list.append(direction_log_sigma.cpu())
+                    direction_sigma_values.append(float(torch.exp(direction_log_sigma).mean().item()))
 
             if step % self.config.log_every == 0:
-                postfix = {
-                    "loss": sum(losses) / len(losses),
-                    "mse": metrics_mod.mse(torch.cat(energy_pred), torch.cat(energy_true)),
-                }
+                if stream_metrics_only:
+                    mse_value = stream_sq_err / max(stream_count, 1)
+                    postfix = {
+                        "loss": sum(losses) / len(losses),
+                        "mse": mse_value,
+                    }
+                else:
+                    postfix = {
+                        "loss": sum(losses) / len(losses),
+                        "mse": metrics_mod.mse(torch.cat(energy_pred), torch.cat(energy_true)),
+                    }
                 if sigma_values:
                     postfix["sigma"] = sum(sigma_values) / len(sigma_values)
                 if direction_sigma_values:
                     postfix["dir_sigma"] = sum(direction_sigma_values) / len(direction_sigma_values)
-                try:
-                    auc = metrics_mod.roc_auc(torch.cat(logits_list), torch.cat(labels_list))
-                except RuntimeError:
-                    auc = None
-                if auc is not None:
-                    postfix["auc"] = auc
+                if not stream_metrics_only:
+                    try:
+                        auc = metrics_mod.roc_auc(torch.cat(logits_list), torch.cat(labels_list))
+                    except RuntimeError:
+                        auc = None
+                    if auc is not None:
+                        postfix["auc"] = auc
                 if self.config.show_progress:
                     iterator.set_postfix(postfix)
+                if log_cuda_memory and step % self.config.log_every == 0:
+                    allocated_gb = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+                    reserved_gb = torch.cuda.memory_reserved(self.device) / (1024 ** 3)
+                    peak_gb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
+                    phase = "train" if training else "val"
+                    epoch_text = str(epoch) if epoch is not None else "-"
+                    print(
+                        f"[cuda-mem] phase={phase} epoch={epoch_text} step={step} "
+                        f"alloc_gb={allocated_gb:.2f} reserved_gb={reserved_gb:.2f} peak_alloc_gb={peak_gb:.2f}"
+                    )
 
-        metrics = self._compute_metrics(
-            logits_list,
-            labels_list,
-            energy_pred,
-            energy_true,
-            direction_pred,
-            direction_true,
-            log_sigma_list if log_sigma_list else None,
-            direction_log_sigma_list if direction_log_sigma_list else None,
-        )
+        if stream_metrics_only:
+            metrics: Dict[str, float] = {}
+            n = max(stream_count, 1)
+            metrics["accuracy"] = float(stream_correct / n)
+            metrics["regression_mse"] = float(stream_sq_err / n)
+            metrics["energy_rmse"] = float((stream_sq_err / n) ** 0.5)
+            metrics["energy_bias"] = float(stream_bias / n)
+            if stream_rel_count > 0:
+                rel_mean = stream_rel_sum / stream_rel_count
+                rel_var = max(stream_rel_sq_sum / stream_rel_count - rel_mean * rel_mean, 0.0)
+                metrics["energy_resolution"] = float(rel_var ** 0.5)
+            else:
+                metrics["energy_resolution"] = float("nan")
+
+            denom = stream_count * stream_xx_sum - stream_x_sum * stream_x_sum
+            if abs(denom) > 1e-12 and stream_count >= 2:
+                slope = (stream_count * stream_xy_sum - stream_x_sum * stream_y_sum) / denom
+                intercept = (stream_y_sum - slope * stream_x_sum) / stream_count
+                metrics["linearity_slope"] = float(slope)
+                metrics["linearity_intercept"] = float(intercept)
+            else:
+                metrics["linearity_slope"] = float("nan")
+                metrics["linearity_intercept"] = float("nan")
+
+            if stream_dir_count > 0:
+                metrics["direction_mse"] = float(stream_dir_sq_err / stream_dir_count)
+            else:
+                metrics["direction_mse"] = float("nan")
+
+            metrics["roc_auc"] = float("nan")
+            metrics["classification_auc"] = float("nan")
+            if stream_reg_sigma_count > 0:
+                metrics["regression_sigma"] = float(stream_reg_sigma_sum / stream_reg_sigma_count)
+            if stream_dir_sigma_count > 0:
+                metrics["direction_sigma"] = float(stream_dir_sigma_sum / stream_dir_sigma_count)
+        else:
+            metrics = self._compute_metrics(
+                logits_list,
+                labels_list,
+                energy_pred,
+                energy_true,
+                direction_pred,
+                direction_true,
+                log_sigma_list if log_sigma_list else None,
+                direction_log_sigma_list if direction_log_sigma_list else None,
+            )
         metrics["invalid_entries"] = float(skipped_entries)
         metrics.update({
             "loss": float(sum(losses) / max(len(losses), 1)),
@@ -274,6 +403,29 @@ class Trainer:
         metrics["classification_loss"] = metrics["loss_cls"]
         metrics["regression_loss"] = metrics["loss_reg"]
         metrics["direction_loss"] = metrics["loss_dir"]
+        if self.config.log_batch_lengths and padded_lengths:
+            mean_padded = sum(padded_lengths) / len(padded_lengths)
+            max_padded = max(padded_lengths)
+            mean_valid_max = sum(valid_lengths_max) / len(valid_lengths_max)
+            max_valid = max(valid_lengths_max)
+            mean_valid = sum(valid_lengths_mean) / len(valid_lengths_mean)
+            phase = "train" if training else "val"
+            epoch_text = str(epoch) if epoch is not None else "-"
+            print(
+                f"[batch-length] phase={phase} epoch={epoch_text} "
+                f"padded_mean={mean_padded:.1f} padded_max={max_padded} "
+                f"valid_max_mean={mean_valid_max:.1f} valid_max={max_valid} "
+                f"valid_mean={mean_valid:.1f}"
+            )
+        if log_cuda_memory:
+            peak_gb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
+            peak_reserved_gb = torch.cuda.max_memory_reserved(self.device) / (1024 ** 3)
+            phase = "train" if training else "val"
+            epoch_text = str(epoch) if epoch is not None else "-"
+            print(
+                f"[cuda-mem] phase={phase} epoch={epoch_text} "
+                f"peak_alloc_gb={peak_gb:.2f} peak_reserved_gb={peak_reserved_gb:.2f}"
+            )
 
         if not collect_outputs:
             return metrics

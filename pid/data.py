@@ -523,11 +523,12 @@ class DualReadoutEventDataset(Dataset):
         per_file_indices: List[List[Tuple[int, int]]] = []
 
         for file_id, file_path in enumerate(self.files):
-            self._log(
-                f"  Indexing file {file_id + 1}/{len(self.files)}: {file_path}"
-            )
             with h5py.File(file_path, "r") as handle:
                 num_events = len(handle[self.label_key])
+                self._log(
+                    f"  Indexing file {file_id + 1}/{len(self.files)}: {file_path} "
+                    f"(available_events={num_events})"
+                )
                 
                 # If max_events is set, we can limit the number of chunks to scan
                 scan_num_events = num_events
@@ -587,16 +588,45 @@ class DualReadoutEventDataset(Dataset):
 
         if per_file_indices and self._max_events is not None:
             per_file_indices = [entries[: self._max_events] for entries in per_file_indices]
+
+        def _group_by_cache_chunk(entries: List[Tuple[int, int]]) -> List[List[Tuple[int, int]]]:
+            if not entries:
+                return []
+            groups: List[List[Tuple[int, int]]] = []
+            current_group: List[Tuple[int, int]] = []
+            current_chunk_start: int | None = None
+            for file_id, event_id in entries:
+                chunk_start = (event_id // self.cache_size) * self.cache_size
+                if current_chunk_start is None or chunk_start != current_chunk_start:
+                    if current_group:
+                        groups.append(current_group)
+                    current_group = [(file_id, event_id)]
+                    current_chunk_start = chunk_start
+                else:
+                    current_group.append((file_id, event_id))
+            if current_group:
+                groups.append(current_group)
+            return groups
+
         rng = np.random.default_rng(12345)
-        cursor = np.zeros(len(per_file_indices), dtype=int)
-        labels = list(range(len(per_file_indices)))
-        total = sum(len(entries) for entries in per_file_indices)
-        while len(self._indices) < total:
-            l= rng.choice(labels)
-            if cursor[l] < len(per_file_indices[l]):
-                i = cursor[l]
-                self._indices.append(per_file_indices[l][i])
-                cursor[l] += 1
+        per_file_chunk_groups: List[List[List[Tuple[int, int]]]] = []
+        for entries in per_file_indices:
+            chunk_groups = _group_by_cache_chunk(entries)
+            if chunk_groups:
+                order = rng.permutation(len(chunk_groups))
+                chunk_groups = [chunk_groups[idx] for idx in order]
+            per_file_chunk_groups.append(chunk_groups)
+
+        active_files = [file_id for file_id, groups in enumerate(per_file_chunk_groups) if groups]
+        chunk_cursor = np.zeros(len(per_file_chunk_groups), dtype=int)
+        while active_files:
+            file_pos = int(rng.integers(0, len(active_files)))
+            file_id = active_files[file_pos]
+            group_index = int(chunk_cursor[file_id])
+            self._indices.extend(per_file_chunk_groups[file_id][group_index])
+            chunk_cursor[file_id] += 1
+            if chunk_cursor[file_id] >= len(per_file_chunk_groups[file_id]):
+                active_files.pop(file_pos)
 
     def _estimate_amplitude_sum_threshold(self) -> float:
         """Estimate a robust amplitude sum threshold for masking outliers."""
@@ -761,40 +791,8 @@ def collate_events(
     if trim_energy_max is None:
         trim_energy_max = float(os.environ.get("PID_TRIM_E_MAX", "100.0"))
 
-    max_hits = max(record.points.shape[0] for record in batch)
-    feature_dim = batch[0].points.shape[1]
-    batch_size = len(batch)
-
-    points = torch.zeros(batch_size, max_hits, feature_dim, dtype=batch[0].points.dtype)
-    mask = torch.zeros(batch_size, max_hits, dtype=torch.bool)
-    summary = torch.stack([record.summary for record in batch], dim=0)
-    labels = torch.tensor([record.label for record in batch], dtype=torch.long)
-    energy = torch.stack([record.energy for record in batch], dim=0).squeeze(-1)
-    direction_template = next((record.direction for record in batch if record.direction is not None), None)
-    direction = None
-    if direction_template is not None:
-        direction = torch.stack(
-            [
-                record.direction
-                if record.direction is not None
-                else torch.zeros_like(direction_template)
-                for record in batch
-            ],
-            dim=0,
-        )
-    event_id = torch.tensor([record.event_id for record in batch], dtype=torch.long)
-    pos_template = next((record.pos for record in batch if record.pos is not None), None)
-    pos = None
-    if pos_template is not None:
-        pos = torch.zeros(
-            batch_size,
-            max_hits,
-            pos_template.shape[-1],
-            dtype=pos_template.dtype,
-        )
-
-    for i, record in enumerate(batch):
-        num_hits = record.points.shape[0]
+    def _effective_num_hits(record: EventRecord) -> int:
+        num_hits = int(record.points.shape[0])
         cid = None
         if record.cid is not None and num_hits > 0:
             cid = record.cid[:num_hits].reshape(-1)
@@ -833,9 +831,42 @@ def collate_events(
             if cid is not None:
                 target_hits = _trim_left_to_cid_boundary(cid, target_hits)
             num_hits = target_hits
-            if cid is not None:
-                cid = cid[:num_hits]
+        return max(0, int(num_hits))
 
+    num_hits_list = [_effective_num_hits(record) for record in batch]
+    max_hits = max(max(num_hits_list), 1)
+    feature_dim = batch[0].points.shape[1]
+    batch_size = len(batch)
+
+    points = torch.zeros(batch_size, max_hits, feature_dim, dtype=batch[0].points.dtype)
+    mask = torch.zeros(batch_size, max_hits, dtype=torch.bool)
+    summary = torch.stack([record.summary for record in batch], dim=0)
+    labels = torch.tensor([record.label for record in batch], dtype=torch.long)
+    energy = torch.stack([record.energy for record in batch], dim=0).squeeze(-1)
+    direction_template = next((record.direction for record in batch if record.direction is not None), None)
+    direction = None
+    if direction_template is not None:
+        direction = torch.stack(
+            [
+                record.direction
+                if record.direction is not None
+                else torch.zeros_like(direction_template)
+                for record in batch
+            ],
+            dim=0,
+        )
+    event_id = torch.tensor([record.event_id for record in batch], dtype=torch.long)
+    pos_template = next((record.pos for record in batch if record.pos is not None), None)
+    pos = None
+    if pos_template is not None:
+        pos = torch.zeros(
+            batch_size,
+            max_hits,
+            pos_template.shape[-1],
+            dtype=pos_template.dtype,
+        )
+
+    for i, (record, num_hits) in enumerate(zip(batch, num_hits_list)):
         points[i, :num_hits] = record.points[:num_hits]
         mask[i, :num_hits] = True
         if pos is not None and record.pos is not None:

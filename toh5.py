@@ -656,7 +656,7 @@ def main():
                     sample_name = f"{pid}_{en}GeV_{timing_size}"
                 processor.process_sample(
                     sample_name,
-                    max_num_files=5000,
+                    max_num_files=10000,
                     num_reader_processes=8,
                     overwrite=args.overwrite,
                     check_only=args.check_only,

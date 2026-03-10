@@ -47,7 +47,14 @@ class PointSetTransformer(nn.Module):
             norm_first=True,
         )
         encoder_layer.self_attn.dropout = attn_dropout
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        # Keep train/eval memory behavior consistent. The default eval-only
+        # nested-tensor fast path can spike memory with long variable-length
+        # sequences in some PyTorch/CUDA combinations.
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth,
+            enable_nested_tensor=False,
+        )
 
         self.norm = nn.LayerNorm(hidden_dim)
         self.aggregator = PointSetAggregator(
