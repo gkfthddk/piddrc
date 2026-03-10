@@ -116,6 +116,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Hit-level feature names to load from the HDF5 files",
     )
     io_group.add_argument(
+        "--shuffle_hit_features",
+        type=str,
+        nargs="*",
+        default=(),
+        help=(
+            "Hit feature names to shuffle independently within each event's valid points "
+            "before model input. This preserves each feature's marginal distribution while "
+            "breaking point-wise relationships."
+        ),
+    )
+    io_group.add_argument(
+        "--shuffle_hit_feature_groups",
+        type=str,
+        nargs="*",
+        default=(),
+        help=(
+            "Comma-separated groups of hit features to shuffle with the same within-event "
+            "permutation. Example: DRcalo3dHits.time,DRcalo3dHits.time_end"
+        ),
+    )
+    io_group.add_argument(
+        "--shuffle_hit_feature_seed",
+        type=int,
+        default=1234,
+        help="Base seed used for deterministic within-event hit-feature shuffling.",
+    )
+    io_group.add_argument(
         "--pos_keys",
         type=str,
         nargs="+",
@@ -213,6 +240,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=8,
         help="Maximum cached chunks kept per worker. Use <=0 to disable the limit.",
+    )
+    io_group.add_argument(
+        "--enable_filter_amp",
+        dest="filter_amp",
+        action="store_true",
+        help="Enable amplitude-based event filtering during dataset indexing.",
     )
     io_group.add_argument(
         "--no_energy_adaptive_trim",
@@ -450,7 +483,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Force math SDPA backend (disable flash/mem-efficient SDPA) for consistent train/eval memory behavior.",
     )
-    parser.set_defaults(dataset_progress=True, progress_bar=True)
+    parser.set_defaults(dataset_progress=True, progress_bar=True, filter_amp=False)
 
     args = parser.parse_args(remaining_argv)
 
@@ -474,9 +507,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.hit_features = [
             feat.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for feat in args.hit_features
         ]
+        args.shuffle_hit_features = [
+            feat.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for feat in args.shuffle_hit_features
+        ]
+        args.shuffle_hit_feature_groups = [
+            ",".join(
+                part.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}")
+                for part in group.split(",")
+            )
+            for group in args.shuffle_hit_feature_groups
+        ]
         args.pos_keys = [
             key.replace("DRcalo3dHits", f"DRcalo3dHits{args.pool}") for key in args.pos_keys
         ]
+        args.trim_amp_feature = args.trim_amp_feature.replace(
+            "DRcalo3dHits",
+            f"DRcalo3dHits{args.pool}",
+        )
     if args.enable_direction_regression and len(args.direction_keys) == 0:
         raise ValueError("Provide at least one direction key when --enable_direction_regression is set.")
     if args.direction_weight < 0:
@@ -610,6 +657,7 @@ def build_datasets(
         max_points=args.max_points,
         pool=pool,
         balance_files=balance_train_files,
+        filter_amp=args.filter_amp,
         max_events=train_limit,
         progress=progress,
         cache_size=args.cache_size,
@@ -631,6 +679,7 @@ def build_datasets(
             max_points=args.max_points,
             pool=pool,
             class_names=base_dataset.classes,
+            filter_amp=args.filter_amp,
             progress=progress,
             cache_size=args.cache_size,
             max_cache_chunks=max_cache_chunks,
@@ -651,6 +700,7 @@ def build_datasets(
             max_points=args.max_points,
             pool=pool,
             class_names=base_dataset.classes,
+            filter_amp=args.filter_amp,
             progress=progress,
             cache_size=args.cache_size,
             max_cache_chunks=max_cache_chunks,
@@ -1027,6 +1077,7 @@ def main() -> None:
         max_points=args.max_points,
         pool=getattr(args, "pool", 1),
         balance_files=getattr(args, "balance_train_files", False),
+        filter_amp=args.filter_amp,
         max_events=1,
         progress=False,
         cache_size=args.cache_size,
@@ -1038,6 +1089,48 @@ def main() -> None:
             f"WARNING: trim_amp_feature '{args.trim_amp_feature}' not found in hit_features. "
             "Energy-adaptive trimming will be skipped."
         )
+    shuffle_feature_indices = []
+    for feature_name in args.shuffle_hit_features:
+        feature_index = probe_dataset.feature_to_index.get(feature_name)
+        if feature_index is None:
+            raise ValueError(
+                f"shuffle_hit_feature '{feature_name}' not found in hit_features"
+            )
+        shuffle_feature_indices.append(int(feature_index))
+    shuffle_feature_groups: list[tuple[int, ...]] = []
+    used_shuffle_features = set(args.shuffle_hit_features)
+    for raw_group in args.shuffle_hit_feature_groups:
+        group_names = tuple(part.strip() for part in raw_group.split(",") if part.strip())
+        if len(group_names) == 0:
+            continue
+        group_indices = []
+        for feature_name in group_names:
+            feature_index = probe_dataset.feature_to_index.get(feature_name)
+            if feature_index is None:
+                raise ValueError(
+                    f"shuffle_hit_feature_group member '{feature_name}' not found in hit_features"
+                )
+            if feature_name in used_shuffle_features:
+                raise ValueError(
+                    f"shuffle feature '{feature_name}' is specified more than once across "
+                    "--shuffle_hit_features/--shuffle_hit_feature_groups"
+                )
+            used_shuffle_features.add(feature_name)
+            group_indices.append(int(feature_index))
+        if len(group_indices) > 0:
+            shuffle_feature_groups.append(tuple(group_indices))
+    if shuffle_feature_indices:
+        print(
+            "Shuffling hit features within valid points: "
+            + ", ".join(args.shuffle_hit_features),
+            flush=True,
+        )
+    if shuffle_feature_groups:
+        print(
+            "Grouped shuffling hit features within valid points: "
+            + "; ".join(args.shuffle_hit_feature_groups),
+            flush=True,
+        )
     runtime_collate = partial(
         collate_events,
         use_energy_adaptive_trim=args.energy_adaptive_trim,
@@ -1046,6 +1139,9 @@ def main() -> None:
         trim_keep_frac_max=args.trim_keep_frac_max,
         trim_energy_min=args.trim_energy_min,
         trim_energy_max=args.trim_energy_max,
+        shuffle_feature_indices=tuple(shuffle_feature_indices),
+        shuffle_feature_groups=tuple(shuffle_feature_groups),
+        shuffle_feature_seed=int(args.shuffle_hit_feature_seed),
     )
     model = build_model(args, probe_dataset)
     model.to(device)

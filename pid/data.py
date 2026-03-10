@@ -71,6 +71,67 @@ def _adaptive_keep_fraction(
     return float(np.clip(frac, lo, hi))
 
 
+def _shuffle_selected_features_in_place(
+    points: torch.Tensor,
+    feature_indices: Sequence[int],
+    event_id: Tuple[int, int],
+    base_seed: int,
+    seed_offset: int = 0,
+) -> None:
+    """Shuffle selected feature columns within one event's valid points."""
+    num_hits = int(points.shape[0])
+    if num_hits <= 1 or len(feature_indices) == 0:
+        return
+
+    generator = torch.Generator()
+    file_id = int(event_id[0])
+    local_event_id = int(event_id[1])
+    event_seed = (
+        int(base_seed)
+        + 1_000_003 * (file_id + 1)
+        + 2_000_033 * (local_event_id + 1)
+        + int(seed_offset)
+    ) & 0x7FFF_FFFF
+
+    for feature_index in feature_indices:
+        if feature_index < 0 or feature_index >= points.shape[1]:
+            continue
+        generator.manual_seed((event_seed + 2_654_435_761 * (int(feature_index) + 1)) & 0x7FFF_FFFF)
+        perm = torch.randperm(num_hits, generator=generator)
+        column = points[:num_hits, feature_index].clone()
+        points[:num_hits, feature_index] = column[perm]
+
+
+def _shuffle_feature_group_in_place(
+    points: torch.Tensor,
+    feature_indices: Sequence[int],
+    event_id: Tuple[int, int],
+    base_seed: int,
+    group_index: int,
+) -> None:
+    """Shuffle a feature group with one shared permutation."""
+    num_hits = int(points.shape[0])
+    if num_hits <= 1 or len(feature_indices) == 0:
+        return
+
+    generator = torch.Generator()
+    file_id = int(event_id[0])
+    local_event_id = int(event_id[1])
+    event_seed = (
+        int(base_seed)
+        + 1_000_003 * (file_id + 1)
+        + 2_000_033 * (local_event_id + 1)
+        + 97_531 * (group_index + 1)
+    ) & 0x7FFF_FFFF
+    generator.manual_seed(event_seed)
+    perm = torch.randperm(num_hits, generator=generator)
+    for feature_index in feature_indices:
+        if feature_index < 0 or feature_index >= points.shape[1]:
+            continue
+        column = points[:num_hits, feature_index].clone()
+        points[:num_hits, feature_index] = column[perm]
+
+
 def _decode_label(value: np.ndarray) -> str:
     """Decode a scalar value coming from HDF5 into a Python string."""
 
@@ -217,6 +278,7 @@ class DualReadoutEventDataset(Dataset):
         summary_fn: Optional[SummaryFnType] = None,
         class_names: Optional[Sequence[str]] = None,
         balance_files: bool = False,
+        filter_amp: bool = False,
         max_events: Optional[int] = None,
         progress: bool = True,
         cache_size: int = 1024,
@@ -298,6 +360,7 @@ class DualReadoutEventDataset(Dataset):
         else:
             self._max_cached_chunks = None
         self._balance_files = balance_files
+        self._filter_amp = bool(filter_amp)
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative when provided")
         self._max_events = max_events
@@ -323,18 +386,21 @@ class DualReadoutEventDataset(Dataset):
 
         self._log(f"Discovered {len(self.classes)} class(es)")
 
-        self._log("Estimating amplitude-sum threshold")
-        stats = None
-        if isinstance(self._channel_stat, Mapping):
-            stats = self._channel_stat.get("S_amp")
-        if isinstance(stats, Mapping):
-            max_value = stats.get("max")
-            if isinstance(max_value, (int, float)) and np.isfinite(max_value):
-                self._amp_sum_threshold = float(max_value) * 1.5
+        if self._filter_amp:
+            self._log("Estimating amplitude-sum threshold")
+            stats = None
+            if isinstance(self._channel_stat, Mapping):
+                stats = self._channel_stat.get("S_amp")
+            if isinstance(stats, Mapping):
+                max_value = stats.get("max")
+                if isinstance(max_value, (int, float)) and np.isfinite(max_value):
+                    self._amp_sum_threshold = float(max_value) * 1.5
+                else:
+                    self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
             else:
                 self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
         else:
-            self._amp_sum_threshold = self._estimate_amplitude_sum_threshold()
+            self._log("Amplitude-based indexing filter disabled")
         if np.isfinite(self._amp_sum_threshold):
             self._log(f"  Using threshold {self._amp_sum_threshold:,.3f}")
         else:
@@ -517,7 +583,7 @@ class DualReadoutEventDataset(Dataset):
 
     def _build_index(self) -> None:
         self._indices.clear()
-        filter_amp = self.amp_sum_key in self.hit_features
+        filter_amp = self._filter_amp and self.amp_sum_key in self.hit_features
         threshold = self._amp_sum_threshold
 
         per_file_indices: List[List[Tuple[int, int]]] = []
@@ -774,6 +840,9 @@ def collate_events(
     trim_keep_frac_max: Optional[float] = None,
     trim_energy_min: Optional[float] = None,
     trim_energy_max: Optional[float] = None,
+    shuffle_feature_indices: Optional[Sequence[int]] = None,
+    shuffle_feature_groups: Optional[Sequence[Sequence[int]]] = None,
+    shuffle_feature_seed: int = 1234,
 ) -> Dict[str, torch.Tensor]:
     """Custom ``DataLoader`` collation for variable-length point clouds."""
 
@@ -866,8 +935,27 @@ def collate_events(
             dtype=pos_template.dtype,
         )
 
+    active_shuffle_indices = tuple(int(index) for index in (shuffle_feature_indices or ()))
+    active_shuffle_groups = tuple(tuple(int(index) for index in group) for group in (shuffle_feature_groups or ()))
+
     for i, (record, num_hits) in enumerate(zip(batch, num_hits_list)):
         points[i, :num_hits] = record.points[:num_hits]
+        if active_shuffle_indices and num_hits > 1:
+            _shuffle_selected_features_in_place(
+                points[i, :num_hits],
+                active_shuffle_indices,
+                record.event_id,
+                shuffle_feature_seed,
+            )
+        if active_shuffle_groups and num_hits > 1:
+            for group_index, group in enumerate(active_shuffle_groups):
+                _shuffle_feature_group_in_place(
+                    points[i, :num_hits],
+                    group,
+                    record.event_id,
+                    shuffle_feature_seed,
+                    group_index,
+                )
         mask[i, :num_hits] = True
         if pos is not None and record.pos is not None:
             pos[i, :num_hits] = record.pos[:num_hits]
