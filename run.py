@@ -13,6 +13,8 @@ import argparse
 import json
 import os
 import datetime
+import re
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -41,6 +43,62 @@ MODEL_REGISTRY = {
     "mlppp": PointSetMLPpp,
     "mamba2": PointSetMamba,
 }
+
+
+class _TeeStream:
+    """Write stream output to multiple file-like targets."""
+
+    def __init__(self, *targets: Any) -> None:
+        self._targets = targets
+        self.encoding = getattr(targets[0], "encoding", "utf-8") if targets else "utf-8"
+
+    def write(self, data: str) -> int:
+        for target in self._targets:
+            target.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for target in self._targets:
+            target.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(target, "isatty", lambda: False)() for target in self._targets)
+
+
+class _SanitizedLogStream:
+    """Collapse carriage-return progress updates into clean log lines."""
+
+    _ansi_escape_re = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    def __init__(self, target: Any) -> None:
+        self._target = target
+        self._buffer = ""
+        self.encoding = getattr(target, "encoding", "utf-8")
+
+    def write(self, data: str) -> int:
+        clean = self._ansi_escape_re.sub("", data)
+        for char in clean:
+            if char == "\r":
+                self._buffer = ""
+            elif char == "\n":
+                self._target.write(self._buffer + "\n")
+                self._buffer = ""
+            else:
+                self._buffer += char
+        return len(data)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def close(self) -> None:
+        if self._buffer:
+            self._target.write(self._buffer + "\n")
+            self._buffer = ""
+        self._target.flush()
+        self._target.close()
+
+    def isatty(self) -> bool:
+        return False
 
 
 def _write_test_outputs(records: Sequence[Dict[str, Any]], destination: Path | None) -> None:
@@ -97,7 +155,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     io_group.add_argument(
         "--stat_file",
         type=Path,
-        default="stats_1-100GeV.yaml",
+        default="stats_1-120GeV.yaml",
         help="input channel statistics yaml files",
     )
     io_group.add_argument(
@@ -378,6 +436,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=1.0,
         help="Weight applied to the optional direction regression loss.",
     )
+    train_group.add_argument(
+        "--classification_weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to the classification loss term.",
+    )
+    train_group.add_argument(
+        "--regression_weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to the energy regression loss term.",
+    )
     train_group.add_argument("--use_amp", action="store_true", help="Enable automatic mixed precision")
     train_group.add_argument("--num_workers", type=int, default=4)
 
@@ -447,6 +517,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     misc_group.add_argument(
+        "--log_file",
+        type=Path,
+        default=None,
+        help="Optional path to tee stdout/stderr logs. Defaults to 'save/<name>/train.log'.",
+    )
+    misc_group.add_argument(
         "--compile",
         action="store_true",
         help="Enable torch.compile() for model acceleration (PyTorch 2.0+)",
@@ -501,6 +577,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.config_json = base_dir / "config.json"
         if args.output_json is None:
             args.output_json = base_dir / "output.json"
+        if args.log_file is None:
+            args.log_file = base_dir / "train.log"
         if args.profile_dir is None:
             args.profile_dir = base_dir / "profile"
     if args.pool > 1:
@@ -952,6 +1030,8 @@ def configure_trainer(
     checkpoint_path: Path | None,
     show_progress: bool,
     lr_scheduler_name: str | None,
+    classification_weight: float,
+    regression_weight: float,
     freeze_sigma: int,
     direction_weight: float,
     use_direction_regression: bool,
@@ -964,6 +1044,8 @@ def configure_trainer(
     config = TrainingConfig(
         epochs=epochs,
         log_every=log_every,
+        classification_weight=classification_weight,
+        regression_weight=regression_weight,
         max_grad_norm=max_grad_norm,
         label_smoothing=label_smoothing, 
         use_amp=use_amp,
@@ -1050,180 +1132,223 @@ def maybe_load_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, pa
 
 
 def main() -> None:
-    start_dt=datetime.datetime.now()
-    print(f"{os.path.basename(__file__)} started at {start_dt.isoformat(sep=' ', timespec='seconds')}")
     args = parse_args()
-
-    maybe_save_config(args, args.config_json)
-
-    device = torch.device(args.device)
-    if args.force_math_sdp and torch.cuda.is_available():
-        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-            torch.backends.cuda.enable_flash_sdp(False)
-        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-        if hasattr(torch.backends.cuda, "enable_math_sdp"):
-            torch.backends.cuda.enable_math_sdp(True)
-        print("SDPA backend forced to math (flash/mem-efficient disabled).", flush=True)
-
-    probe_dataset = DualReadoutEventDataset(
-        [str(path) for path in args.train_files],
-        hit_features=args.hit_features,
-        pos_keys=list(args.pos_keys),
-        label_key=args.label_key,
-        energy_key=args.energy_key,
-        direction_keys=args.direction_keys if args.enable_direction_regression else None,
-        stat_file=args.stat_file,
-        max_points=args.max_points,
-        pool=getattr(args, "pool", 1),
-        balance_files=getattr(args, "balance_train_files", False),
-        filter_amp=args.filter_amp,
-        max_events=1,
-        progress=False,
-        cache_size=args.cache_size,
-        max_cache_chunks=None if args.max_cache_chunks <= 0 else int(args.max_cache_chunks),
-    )
-    trim_amp_feature_index = probe_dataset.feature_to_index.get(args.trim_amp_feature)
-    if args.energy_adaptive_trim and trim_amp_feature_index is None:
-        print(
-            f"WARNING: trim_amp_feature '{args.trim_amp_feature}' not found in hit_features. "
-            "Energy-adaptive trimming will be skipped."
+    log_handle = None
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    if args.log_file is not None:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = _SanitizedLogStream(
+            args.log_file.open("a", encoding="utf-8", buffering=1)
         )
-    shuffle_feature_indices = []
-    for feature_name in args.shuffle_hit_features:
-        feature_index = probe_dataset.feature_to_index.get(feature_name)
-        if feature_index is None:
-            raise ValueError(
-                f"shuffle_hit_feature '{feature_name}' not found in hit_features"
+        sys.stdout = _TeeStream(original_stdout, log_handle)
+        sys.stderr = _TeeStream(original_stderr, log_handle)
+        print(f"Logging stdout/stderr to {args.log_file}", flush=True)
+    start_dt = datetime.datetime.now()
+    try:
+        print(f"{os.path.basename(__file__)} started at {start_dt.isoformat(sep=' ', timespec='seconds')}")
+
+        maybe_save_config(args, args.config_json)
+
+        device = torch.device(args.device)
+        if args.force_math_sdp and torch.cuda.is_available():
+            if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                torch.backends.cuda.enable_flash_sdp(False)
+            if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                torch.backends.cuda.enable_mem_efficient_sdp(False)
+            if hasattr(torch.backends.cuda, "enable_math_sdp"):
+                torch.backends.cuda.enable_math_sdp(True)
+            print("SDPA backend forced to math (flash/mem-efficient disabled).", flush=True)
+
+        probe_dataset = DualReadoutEventDataset(
+            [str(path) for path in args.train_files],
+            hit_features=args.hit_features,
+            pos_keys=list(args.pos_keys),
+            label_key=args.label_key,
+            energy_key=args.energy_key,
+            direction_keys=args.direction_keys if args.enable_direction_regression else None,
+            stat_file=args.stat_file,
+            max_points=args.max_points,
+            pool=getattr(args, "pool", 1),
+            balance_files=getattr(args, "balance_train_files", False),
+            filter_amp=args.filter_amp,
+            max_events=1,
+            progress=False,
+            cache_size=args.cache_size,
+            max_cache_chunks=None if args.max_cache_chunks <= 0 else int(args.max_cache_chunks),
+        )
+        trim_amp_feature_index = probe_dataset.feature_to_index.get(args.trim_amp_feature)
+        if args.energy_adaptive_trim and trim_amp_feature_index is None:
+            print(
+                f"WARNING: trim_amp_feature '{args.trim_amp_feature}' not found in hit_features. "
+                "Energy-adaptive trimming will be skipped."
             )
-        shuffle_feature_indices.append(int(feature_index))
-    shuffle_feature_groups: list[tuple[int, ...]] = []
-    used_shuffle_features = set(args.shuffle_hit_features)
-    for raw_group in args.shuffle_hit_feature_groups:
-        group_names = tuple(part.strip() for part in raw_group.split(",") if part.strip())
-        if len(group_names) == 0:
-            continue
-        group_indices = []
-        for feature_name in group_names:
+        shuffle_feature_indices = []
+        for feature_name in args.shuffle_hit_features:
             feature_index = probe_dataset.feature_to_index.get(feature_name)
             if feature_index is None:
                 raise ValueError(
-                    f"shuffle_hit_feature_group member '{feature_name}' not found in hit_features"
+                    f"shuffle_hit_feature '{feature_name}' not found in hit_features"
                 )
-            if feature_name in used_shuffle_features:
-                raise ValueError(
-                    f"shuffle feature '{feature_name}' is specified more than once across "
-                    "--shuffle_hit_features/--shuffle_hit_feature_groups"
-                )
-            used_shuffle_features.add(feature_name)
-            group_indices.append(int(feature_index))
-        if len(group_indices) > 0:
-            shuffle_feature_groups.append(tuple(group_indices))
-    if shuffle_feature_indices:
-        print(
-            "Shuffling hit features within valid points: "
-            + ", ".join(args.shuffle_hit_features),
-            flush=True,
+            shuffle_feature_indices.append(int(feature_index))
+        shuffle_feature_groups: list[tuple[int, ...]] = []
+        used_shuffle_features = set(args.shuffle_hit_features)
+        for raw_group in args.shuffle_hit_feature_groups:
+            group_names = tuple(part.strip() for part in raw_group.split(",") if part.strip())
+            if len(group_names) == 0:
+                continue
+            group_indices = []
+            for feature_name in group_names:
+                feature_index = probe_dataset.feature_to_index.get(feature_name)
+                if feature_index is None:
+                    raise ValueError(
+                        f"shuffle_hit_feature_group member '{feature_name}' not found in hit_features"
+                    )
+                if feature_name in used_shuffle_features:
+                    raise ValueError(
+                        f"shuffle feature '{feature_name}' is specified more than once across "
+                        "--shuffle_hit_features/--shuffle_hit_feature_groups"
+                    )
+                used_shuffle_features.add(feature_name)
+                group_indices.append(int(feature_index))
+            if len(group_indices) > 0:
+                shuffle_feature_groups.append(tuple(group_indices))
+        if shuffle_feature_indices:
+            print(
+                "Shuffling hit features within valid points: "
+                + ", ".join(args.shuffle_hit_features),
+                flush=True,
+            )
+        if shuffle_feature_groups:
+            print(
+                "Grouped shuffling hit features within valid points: "
+                + "; ".join(args.shuffle_hit_feature_groups),
+                flush=True,
+            )
+        runtime_collate = partial(
+            collate_events,
+            use_energy_adaptive_trim=args.energy_adaptive_trim,
+            trim_amp_feature_index=trim_amp_feature_index,
+            trim_keep_frac_min=args.trim_keep_frac_min,
+            trim_keep_frac_max=args.trim_keep_frac_max,
+            trim_energy_min=args.trim_energy_min,
+            trim_energy_max=args.trim_energy_max,
+            shuffle_feature_indices=tuple(shuffle_feature_indices),
+            shuffle_feature_groups=tuple(shuffle_feature_groups),
+            shuffle_feature_seed=int(args.shuffle_hit_feature_seed),
         )
-    if shuffle_feature_groups:
-        print(
-            "Grouped shuffling hit features within valid points: "
-            + "; ".join(args.shuffle_hit_feature_groups),
-            flush=True,
+        model = build_model(args, probe_dataset)
+        model.to(device)
+
+        # Add torch.compile for a potential speed-up on PyTorch 2.0+
+        if hasattr(torch, "compile") and args.compile:
+            compile_mode = "reduce-overhead"
+            if args.profile:
+                compile_mode = "default"
+            print(f"Compiling model with torch.compile(mode='{compile_mode}')...")
+            model = torch.compile(model, mode=compile_mode)
+
+        probe_loader = DataLoader(
+            probe_dataset,
+            batch_size=1,
+            collate_fn=runtime_collate,
+            num_workers=0,
+            pin_memory=False,
+            persistent_workers=False,
         )
-    runtime_collate = partial(
-        collate_events,
-        use_energy_adaptive_trim=args.energy_adaptive_trim,
-        trim_amp_feature_index=trim_amp_feature_index,
-        trim_keep_frac_min=args.trim_keep_frac_min,
-        trim_keep_frac_max=args.trim_keep_frac_max,
-        trim_energy_min=args.trim_energy_min,
-        trim_energy_max=args.trim_energy_max,
-        shuffle_feature_indices=tuple(shuffle_feature_indices),
-        shuffle_feature_groups=tuple(shuffle_feature_groups),
-        shuffle_feature_seed=int(args.shuffle_hit_feature_seed),
-    )
-    model = build_model(args, probe_dataset)
-    model.to(device)
 
-    # Add torch.compile for a potential speed-up on PyTorch 2.0+
-    if hasattr(torch, "compile") and args.compile:
-        compile_mode = "reduce-overhead"
-        if args.profile:
-            compile_mode = "default"
-        print(f"Compiling model with torch.compile(mode='{compile_mode}')...")
-        model = torch.compile(model, mode=compile_mode)
+        print_model_summary(
+            model,
+            probe_loader,
+            device,
+            enabled=args.model_summary,
+        )
 
-    probe_loader = DataLoader(
-        probe_dataset,
-        batch_size=1,
-        collate_fn=runtime_collate,
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False,
-    )
+        del probe_loader
+        del probe_dataset
 
-    print_model_summary(
-        model,
-        probe_loader,
-        device,
-        enabled=args.model_summary,
-    )
+        base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
+        print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
 
-    del probe_loader
-    del probe_dataset
+        train_loader, val_loader, test_loader = build_dataloaders(
+            train_dataset,
+            val_dataset,
+            test_dataset,
+            batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            collate_fn=runtime_collate,
+        )
 
-    base_dataset, train_dataset, val_dataset, test_dataset = build_datasets(args)
-    print_dataset_summary(base_dataset, train_dataset, val_dataset, test_dataset)
-
-    train_loader, val_loader, test_loader = build_dataloaders(
-        train_dataset,
-        val_dataset,
-        test_dataset,
-        batch_size=args.batch_size,
-        eval_batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        collate_fn=runtime_collate,
-    )
-
-    trainer, optimizer = configure_trainer(
-        model,
-        device=device,
-        learning_rate=args.learning_rate,
-        label_smoothing=args.label_smoothing,
-        weight_decay=args.weight_decay,
-        epochs=args.epochs,
-        log_every=args.log_every,
-        max_grad_norm=args.max_grad_norm,
+        trainer, optimizer = configure_trainer(
+            model,
+            device=device,
+            learning_rate=args.learning_rate,
+            label_smoothing=args.label_smoothing,
+            weight_decay=args.weight_decay,
+            epochs=args.epochs,
+            log_every=args.log_every,
+            max_grad_norm=args.max_grad_norm,
         use_amp=args.use_amp,
         show_progress=args.progress_bar,
         checkpoint_path=args.checkpoint,
         lr_scheduler_name=args.lr_scheduler,
+        classification_weight=args.classification_weight,
+        regression_weight=args.regression_weight,
         freeze_sigma=args.freeze_sigma,
         direction_weight=args.direction_weight,
         use_direction_regression=args.enable_direction_regression,
-        profile=args.profile,
-        profile_dir=args.profile_dir,
-        log_batch_lengths=args.log_batch_lengths,
-        log_cuda_memory=args.log_cuda_memory,
-    )
+            profile=args.profile,
+            profile_dir=args.profile_dir,
+            log_batch_lengths=args.log_batch_lengths,
+            log_cuda_memory=args.log_cuda_memory,
+        )
 
-    if args.checkpoint is not None and args.eval_only:
-        maybe_load_checkpoint(model, optimizer, args.checkpoint)
-        eval_targets: Dict[str, DataLoader] = {}
-        if test_loader is not None:
-            eval_targets["test"] = test_loader
+        if args.checkpoint is not None and args.eval_only:
+            maybe_load_checkpoint(model, optimizer, args.checkpoint)
+            eval_targets: Dict[str, DataLoader] = {}
+            if test_loader is not None:
+                eval_targets["test"] = test_loader
+            if val_loader is not None:
+                eval_targets.setdefault("val", val_loader)
+            if not eval_targets:
+                eval_targets["train"] = train_loader
+            metrics: Dict[str, Any] = {}
+            test_outputs = None
+            for split, loader in eval_targets.items():
+                if split == "test":
+                    split_metrics, test_outputs = trainer.evaluate(
+                        loader, return_outputs=True
+                    )
+                    metrics[split] = split_metrics
+                else:
+                    metrics[split] = trainer.evaluate(loader)
+            print(json.dumps(metrics, indent=2))
+            maybe_save_metrics(metrics, args.metrics_json)
+            if test_outputs is not None:
+                _write_test_outputs(test_outputs, args.output_json)
+            return
+
+        if args.checkpoint is not None:
+            maybe_load_checkpoint(model, optimizer, args.checkpoint if args.checkpoint.exists() else None)
+
+        history = trainer.fit(train_loader, val_loader)
+        maybe_save_history(history, args.history_json)
+        maybe_save_checkpoint(model, optimizer, args.checkpoint)
+
+        evaluation_loaders: Dict[str, DataLoader] = {}
         if val_loader is not None:
-            eval_targets.setdefault("val", val_loader)
-        if not eval_targets:
-            eval_targets["train"] = train_loader
+            evaluation_loaders["val"] = val_loader
+        if test_loader is not None:
+            evaluation_loaders["test"] = test_loader
+        if not evaluation_loaders:
+            evaluation_loaders["train"] = train_loader
+
         metrics: Dict[str, Any] = {}
         test_outputs = None
-        for split, loader in eval_targets.items():
+        for split, loader in evaluation_loaders.items():
             if split == "test":
-                split_metrics, test_outputs = trainer.evaluate(
-                    loader, return_outputs=True
-                )
+                split_metrics, test_outputs = trainer.evaluate(loader, return_outputs=True)
                 metrics[split] = split_metrics
             else:
                 metrics[split] = trainer.evaluate(loader)
@@ -1231,38 +1356,14 @@ def main() -> None:
         maybe_save_metrics(metrics, args.metrics_json)
         if test_outputs is not None:
             _write_test_outputs(test_outputs, args.output_json)
-        return
-
-    if args.checkpoint is not None:
-        maybe_load_checkpoint(model, optimizer, args.checkpoint if args.checkpoint.exists() else None)
-
-    history = trainer.fit(train_loader, val_loader)
-    maybe_save_history(history, args.history_json)
-    maybe_save_checkpoint(model, optimizer, args.checkpoint)
-
-    evaluation_loaders: Dict[str, DataLoader] = {}
-    if val_loader is not None:
-        evaluation_loaders["val"] = val_loader
-    if test_loader is not None:
-        evaluation_loaders["test"] = test_loader
-    if not evaluation_loaders:
-        evaluation_loaders["train"] = train_loader
-  
-    metrics: Dict[str, Any] = {}
-    test_outputs = None
-    for split, loader in evaluation_loaders.items():
-        if split == "test":
-            split_metrics, test_outputs = trainer.evaluate(loader, return_outputs=True)
-            metrics[split] = split_metrics
-        else:
-            metrics[split] = trainer.evaluate(loader)
-    print(json.dumps(metrics, indent=2))
-    maybe_save_metrics(metrics, args.metrics_json)
-    if test_outputs is not None:
-        _write_test_outputs(test_outputs, args.output_json)
-    end_dt=datetime.datetime.now()
-    print(f"{os.path.basename(__file__)} ended at {end_dt.isoformat(sep=' ', timespec='seconds')}")
-    print(f"Total running time: {end_dt - start_dt}")
+    finally:
+        end_dt = datetime.datetime.now()
+        print(f"{os.path.basename(__file__)} ended at {end_dt.isoformat(sep=' ', timespec='seconds')}")
+        print(f"Total running time: {end_dt - start_dt}")
+        if log_handle is not None:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            log_handle.close()
 
 if __name__ == "__main__":
     main()

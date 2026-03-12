@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence, Tuple
@@ -107,10 +108,20 @@ def _load_var_from_h5(
     records: Sequence[Mapping[str, object]],
     files: Sequence[str],
     dataset_key: str,
+    cache: Dict[Tuple[str, Tuple[str, ...], bytes, bytes], np.ndarray] | None = None,
 ) -> np.ndarray:
+    file_ids, event_ids = _extract_event_ids(records)
+    cache_key = (
+        dataset_key,
+        tuple(str(f) for f in files),
+        file_ids.tobytes(),
+        event_ids.tobytes(),
+    )
+    if cache is not None and cache_key in cache:
+        return cache[cache_key].copy()
+
     n = len(records)
     out = np.full(n, np.nan, dtype=np.float64)
-    file_ids, event_ids = _extract_event_ids(records)
 
     idx_by_file: Dict[int, List[int]] = defaultdict(list)
     for i in range(n):
@@ -135,6 +146,8 @@ def _load_var_from_h5(
             vals = np.empty_like(vals_sorted)
             vals[order] = vals_sorted
             out[np.asarray(rec_indices, dtype=np.int64)] = vals
+    if cache is not None:
+        cache[cache_key] = out.copy()
     return out
 
 
@@ -173,7 +186,7 @@ def binned_accuracy(labels: np.ndarray, logits: np.ndarray, x: np.ndarray, edges
 
 def binned_pair_auc(
     labels: np.ndarray,
-    logits: np.ndarray,
+    probs: np.ndarray,
     x: np.ndarray,
     edges: np.ndarray,
     class_to_label: Mapping[str, int],
@@ -185,15 +198,14 @@ def binned_pair_auc(
         return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
     pos_idx = int(class_to_label[pos])
     neg_idx = int(class_to_label[neg])
-    probs = np.exp(logits - np.max(logits, axis=1, keepdims=True))
-    probs = probs / np.sum(probs, axis=1, keepdims=True)
     score = probs[:, pos_idx]
+    pair_mask = np.isin(labels, [pos_idx, neg_idx])
     centers: List[float] = []
     vals: List[float] = []
     for i in range(len(edges) - 1):
         lo, hi = edges[i], edges[i + 1]
         m = (x >= lo) & (x < hi if i < len(edges) - 2 else x <= hi)
-        m = m & np.isfinite(x) & np.isin(labels, [pos_idx, neg_idx])
+        m = m & np.isfinite(x) & pair_mask
         if extra_mask is not None:
             m = m & extra_mask
         if np.count_nonzero(m) < 2:
@@ -216,8 +228,10 @@ def main() -> None:
     run_names: List[str] = []
     cfgs: List[Dict[str, object]] = []
     run_payloads: List[Dict[str, object]] = []
+    var_cache: Dict[Tuple[str, Tuple[str, ...], bytes, bytes], np.ndarray] = {}
 
     for raw in args.run_dirs:
+        t0 = time.perf_counter()
         run_dir = resolve_run_dir(raw, base_dir)
         metrics_path = run_dir / "metrics.json"
         config_path = run_dir / "config.json"
@@ -229,13 +243,16 @@ def main() -> None:
         records = json.loads(output_path.read_text())
         labels = np.asarray([int(r["label"]) for r in records], dtype=np.int64)
         logits = np.asarray([r["logits"] for r in records], dtype=np.float64)
+        probs = np.exp(logits - np.max(logits, axis=1, keepdims=True))
+        probs = probs / np.sum(probs, axis=1, keepdims=True)
         class_to_label = infer_class_to_label(records, cfg.get("train_files") or [])
 
         # Prefer test_files if explicitly provided; fallback to train_files mapping.
         source_files = cfg.get("test_files") or cfg.get("train_files") or []
-        e_gen = _load_var_from_h5(records, source_files, KIN_VARS["E_gen"])
-        theta = _load_var_from_h5(records, source_files, KIN_VARS["theta"])
-        phi = _load_var_from_h5(records, source_files, KIN_VARS["phi"])
+        print(f"Loading {run_dir.name}: {len(records)} records")
+        e_gen = _load_var_from_h5(records, source_files, KIN_VARS["E_gen"], var_cache)
+        theta = _load_var_from_h5(records, source_files, KIN_VARS["theta"], var_cache)
+        phi = _load_var_from_h5(records, source_files, KIN_VARS["phi"], var_cache)
 
         run_names.append(run_dir.name)
         cfgs.append(cfg)
@@ -243,12 +260,14 @@ def main() -> None:
             {
                 "labels": labels,
                 "logits": logits,
+                "probs": probs,
                 "class_to_label": class_to_label,
                 "E_gen": e_gen,
                 "theta": theta,
                 "phi": phi,
             }
         )
+        print(f"Loaded {run_dir.name} in {time.perf_counter() - t0:.1f}s")
 
     diff_keys = differing_config_keys(cfgs, CONFIG_DIFF_EXCLUDE)
     labels_for_legend = [
@@ -298,7 +317,7 @@ def main() -> None:
                     continue
                 xc, yc = binned_pair_auc(
                     payload["labels"],
-                    payload["logits"],
+                    payload["probs"],
                     x,
                     edges,
                     payload["class_to_label"],
@@ -342,7 +361,7 @@ def main() -> None:
                 continue
             xc, yc = binned_pair_auc(
                 payload["labels"],
-                payload["logits"],
+                payload["probs"],
                 x,
                 edges,
                 payload["class_to_label"],

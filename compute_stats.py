@@ -35,17 +35,19 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     tqdm = None
 
 
-DEFAULT_SAMPLE_SIZE = 20_000
+DEFAULT_SAMPLE_SIZE = 50_000
 DEFAULT_PERCENTILES = (0.5, 0.9, 0.99)
 DEFAULT_DIR = "h5s"
 DEFAULT_FILES = (
-    "e-_1-100GeV_1",
-    "gamma_1-100GeV_1",
-    "pi0_1-100GeV_1",
-    "pi+_1-100GeV_1",
+    "e-_1-120GeV",
+    "gamma_1-120GeV",
+    "pi0_1-120GeV",
+    "pi+_1-120GeV",
 )
 CHUNK_ROWS = 2048
+VERSION = "version18"
 
+# Keep this schema aligned with toh5.py so stats match the merged HDF5 layout.
 _BASE_CHANNELS = [
     "C_amp",
     "C_raw",
@@ -75,12 +77,14 @@ _BASE_CHANNELS = [
     "E_dep",
     "E_gen",
     "E_leak",
+    "GenParticles.PDG",
     "GenParticles.momentum.phi",
     "GenParticles.momentum.theta",
     "seed",
     "S_amp",
     "S_raw",
     "angle2",
+    VERSION,
 ]
 
 _POOL_CHANNEL_TEMPLATES = (
@@ -108,11 +112,12 @@ _POOL_CHANNEL_TEMPLATES = (
     "DRcalo2dHits{pool}.position.z",
     "DRcalo2dHits{pool}.type",
 )
-POOLSET=[4,5,6,7,8,9,10,11,12,13,14,16,28,56]
+POOL_SET=[]
+#POOL_SET=[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 28, 56]
 def _build_write_keys() -> List[str]:
     """Generates the list of all dataset keys to be written."""
     keys = list(_BASE_CHANNELS)  # Start with a copy of base channels
-    for pool in POOLSET:
+    for pool in POOL_SET:
         for template in _POOL_CHANNEL_TEMPLATES:
             keys.append(template.format(pool=pool))
     return keys
@@ -251,7 +256,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="h5s/stats_1-100GeV_1.yaml",
+        default="h5s/stats_1-120GeV.yaml",
         help=(
             "Optional path where the statistics will be written.  The format is "
             "chosen by file extension (.json or .yml/.yaml).  If omitted, the "
@@ -396,6 +401,7 @@ def _dump_results(results: Mapping[str, Mapping[str, float]], output: str | None
         return
 
     os.makedirs(os.path.dirname(output), exist_ok=True) if os.path.dirname(output) else None
+    print("Save output to",output)
 
     ext = os.path.splitext(output)[1].lower()
     if ext == ".json":

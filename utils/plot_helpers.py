@@ -24,6 +24,9 @@ DEFAULT_CONFIG_DIFF_EXCLUDE: Set[str] = {
     "profile_dir",
     "name",
     "instance_name",
+    "progress_bar",
+    "device",
+    "log_file",
 }
 
 
