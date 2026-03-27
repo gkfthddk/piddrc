@@ -265,10 +265,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Fraction of the training data to reserve for testing when no test files are provided",
     )
     io_group.add_argument(
+        "--val_count",
+        type=int,
+        default=None,
+        help="Absolute number of validation events to reserve when no validation files are provided. Overrides --val_fraction.",
+    )
+    io_group.add_argument(
+        "--test_count",
+        type=int,
+        default=None,
+        help="Absolute number of test events to reserve when no test files are provided. Overrides --test_fraction.",
+    )
+    io_group.add_argument(
         "--split_seed",
         type=int,
         default=1234,
         help="Random seed used when splitting the training dataset",
+    )
+    io_group.add_argument(
+        "--fixed_split_json",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a JSON file containing fixed train/val/test split indices for the training files. "
+            "If the file exists it is loaded; otherwise a new split is generated and saved there. "
+            "Only used when --val_files/--test_files are not provided."
+        ),
     )
     io_group.add_argument(
         "--no_dataset_progress",
@@ -619,9 +641,13 @@ def _split_dataset(
     *,
     val_fraction: float,
     test_fraction: float,
+    val_count: int | None,
+    test_count: int | None,
     need_val: bool,
     need_test: bool,
     seed: int,
+    fixed_split_json: Path | None = None,
+    train_limit: int | None = None,
 ) -> Tuple[Dataset[EventRecord], Dataset[EventRecord] | None, Dataset[EventRecord] | None]:
     if not need_val and not need_test:
         return dataset, None, None
@@ -632,46 +658,205 @@ def _split_dataset(
         raise ValueError("test_fraction must be in the [0, 1) range")
     if val_fraction + test_fraction >= 1.0:
         raise ValueError("The sum of val_fraction and test_fraction must be < 1")
+    if val_count is not None and val_count < 0:
+        raise ValueError("val_count must be >= 0")
+    if test_count is not None and test_count < 0:
+        raise ValueError("test_count must be >= 0")
 
     total = len(dataset)
     if total == 0:
         raise ValueError("Cannot split an empty dataset")
 
-    val_len = 0
-    if need_val and val_fraction > 0.0:
-        val_len = max(int(total * val_fraction), 1)
+    def _validate_indices(name: str, indices: list[int], expected_len: int) -> None:
+        if len(indices) != expected_len:
+            raise ValueError(
+                f"Fixed split '{name}' has {len(indices)} entries but expected {expected_len}"
+            )
+        if len(set(indices)) != len(indices):
+            raise ValueError(f"Fixed split '{name}' contains duplicate indices")
+        if any(idx < 0 or idx >= total for idx in indices):
+            raise ValueError(f"Fixed split '{name}' contains out-of-range indices")
 
-    test_len = 0
-    if need_test and test_fraction > 0.0:
-        test_len = max(int(total * test_fraction), 1)
+    def _infer_file_class(raw_path: str) -> str:
+        return Path(str(raw_path)).name.split("_", 1)[0]
 
-    train_len = total - val_len - test_len
-    if train_len <= 0:
-        raise ValueError(
-            "Not enough events to perform the requested split. "
-            "Consider lowering val_fraction/test_fraction."
-        )
+    def _project_classwise_split(payload: Dict[str, Any]) -> Tuple[list[int], list[int], list[int]] | None:
+        per_class = payload.get("per_class")
+        class_order_payload = payload.get("class_order")
+        if not isinstance(per_class, dict) or not isinstance(class_order_payload, list):
+            return None
 
-    lengths: List[int] = [train_len]
-    include_val = val_len > 0
-    include_test = test_len > 0
+        segments: list[tuple[str, int, int]] = []
+        for class_name in class_order_payload:
+            meta = per_class.get(class_name)
+            if not isinstance(meta, dict):
+                return None
+            start = meta.get("offset_start")
+            end = meta.get("offset_end")
+            if start is None or end is None:
+                return None
+            segments.append((str(class_name), int(start), int(end)))
+
+        raw_indices = getattr(dataset, "_indices", None)
+        dataset_files = getattr(dataset, "files", None)
+        if raw_indices is None or dataset_files is None:
+            return None
+
+        event_lookup = {
+            (int(file_id), int(event_id)): int(dataset_index)
+            for dataset_index, (file_id, event_id) in enumerate(raw_indices)
+        }
+        current_class_to_file: Dict[str, int] = {}
+        for file_id, file_path in enumerate(dataset_files):
+            current_class_to_file.setdefault(_infer_file_class(str(file_path)), int(file_id))
+
+        def _convert(indices: list[int], split_name: str) -> tuple[list[int], int]:
+            out: list[int] = []
+            skipped_absent = 0
+            missing_present: list[tuple[str, int]] = []
+            for raw in indices:
+                idx = int(raw)
+                matched = False
+                for class_name, start, end in segments:
+                    if start <= idx < end:
+                        matched = True
+                        file_id = current_class_to_file.get(class_name)
+                        if file_id is None:
+                            skipped_absent += 1
+                            break
+                        event_id = idx - start
+                        dataset_index = event_lookup.get((file_id, event_id))
+                        if dataset_index is None:
+                            missing_present.append((class_name, int(event_id)))
+                        else:
+                            out.append(int(dataset_index))
+                        break
+                if not matched:
+                    raise ValueError(
+                        f"Fixed split '{split_name}' contains index {idx} that does not map to any class range"
+                    )
+            if missing_present:
+                sample = ", ".join(f"{cls}:{eid}" for cls, eid in missing_present[:5])
+                raise ValueError(
+                    f"Fixed split '{split_name}' could not map {len(missing_present)} event(s) "
+                    f"onto the current dataset; sample={sample}"
+                )
+            return out, skipped_absent
+
+        train_projected, train_skipped = _convert([int(idx) for idx in payload.get("train_indices", [])], "train")
+        val_projected, val_skipped = _convert([int(idx) for idx in payload.get("val_indices", [])], "val")
+        test_projected, test_skipped = _convert([int(idx) for idx in payload.get("test_indices", [])], "test")
+        if train_skipped or val_skipped or test_skipped:
+            print(
+                "  Projected fixed split onto current file subset "
+                f"(skipped train/val/test = {train_skipped}/{val_skipped}/{test_skipped})",
+                flush=True,
+            )
+        return train_projected, val_projected, test_projected
+
+    fixed_split_payload = None
+    train_indices_random: list[int] | None = None
+    val_indices_random: list[int] | None = None
+    test_indices_random: list[int] | None = None
+
+    if fixed_split_json is not None and fixed_split_json.exists():
+        fixed_split_payload = json.loads(fixed_split_json.read_text())
+        projected = _project_classwise_split(fixed_split_payload)
+        if projected is not None:
+            train_indices_random, val_indices_random, test_indices_random = projected
+            print(f"  Loaded fixed split from {fixed_split_json} via classwise projection", flush=True)
+        else:
+            saved_total = fixed_split_payload.get("total_events")
+            if saved_total is not None and int(saved_total) != total:
+                raise ValueError(
+                    f"Fixed split total_events={saved_total} does not match dataset size {total}"
+                )
+            train_indices_random = [int(idx) for idx in fixed_split_payload.get("train_indices", [])]
+            val_indices_random = [int(idx) for idx in fixed_split_payload.get("val_indices", [])]
+            test_indices_random = [int(idx) for idx in fixed_split_payload.get("test_indices", [])]
+            print(f"  Loaded fixed split from {fixed_split_json}", flush=True)
+
+        train_indices_random = list(train_indices_random)
+        val_indices_random = list(val_indices_random) if need_val else []
+        test_indices_random = list(test_indices_random) if need_test else []
+        train_len = len(train_indices_random)
+        val_len = len(val_indices_random)
+        test_len = len(test_indices_random)
+        if train_len <= 0:
+            raise ValueError("Fixed split leaves no training events for the current dataset")
+        include_val = need_val and val_len > 0
+        include_test = need_test and test_len > 0
+        _validate_indices("train", train_indices_random, train_len)
+        if include_val:
+            _validate_indices("val", val_indices_random, val_len)
+        if include_test:
+            _validate_indices("test", test_indices_random, test_len)
+    else:
+        val_len = 0
+        if need_val:
+            if val_count is not None:
+                val_len = int(val_count)
+            elif val_fraction > 0.0:
+                val_len = max(int(total * val_fraction), 1)
+
+        test_len = 0
+        if need_test:
+            if test_count is not None:
+                test_len = int(test_count)
+            elif test_fraction > 0.0:
+                test_len = max(int(total * test_fraction), 1)
+
+        train_len = total - val_len - test_len
+        if train_len <= 0:
+            raise ValueError(
+                "Not enough events to perform the requested split. "
+                "Consider lowering val/test split size."
+            )
+
+        include_val = val_len > 0
+        include_test = test_len > 0
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+
+        all_indices = torch.randperm(total, generator=generator).tolist()
+        train_indices_random = all_indices[:train_len]
+        cursor = train_len
+        val_indices_random = all_indices[cursor: cursor + val_len] if include_val else []
+        cursor += val_len
+        test_indices_random = all_indices[cursor: cursor + test_len] if include_test else []
+
+        if fixed_split_json is not None:
+            fixed_split_json.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "seed": int(seed),
+                "total_events": int(total),
+                "val_fraction": float(val_fraction),
+                "test_fraction": float(test_fraction),
+                "val_count": int(val_len),
+                "test_count": int(test_len),
+                "source_files": [str(path) for path in getattr(dataset, "files", ())],
+                "train_indices": train_indices_random,
+                "val_indices": val_indices_random,
+                "test_indices": test_indices_random,
+            }
+            fixed_split_json.write_text(json.dumps(payload, indent=2))
+            print(f"  Saved fixed split to {fixed_split_json}", flush=True)
+
+    lengths: List[int] = [len(train_indices_random)]
     if include_val:
-        lengths.append(val_len)
+        lengths.append(len(val_indices_random))
     if include_test:
-        lengths.append(test_len)
+        lengths.append(len(test_indices_random))
 
     if len(lengths) == 1:
         return dataset, None, None
 
-    generator = torch.Generator()
-    generator.manual_seed(seed)
+    if train_limit is not None and train_limit > 0:
+        train_indices_random = train_indices_random[: min(int(train_limit), len(train_indices_random))]
 
-    all_indices = torch.randperm(total, generator=generator).tolist()
-    train_indices_list = all_indices[:train_len]
-    cursor = train_len
-    val_indices_list = all_indices[cursor: cursor + val_len] if include_val else []
-    cursor += val_len
-    test_indices_list = all_indices[cursor: cursor + test_len] if include_test else []
+    train_indices_list = list(train_indices_random)
+    val_indices_list = list(val_indices_random)
+    test_indices_list = list(test_indices_random)
 
     # Keep random split membership, but preserve dataset order inside each split
     # so cache-chunk locality in the base dataset is not destroyed by Subset order.
@@ -719,6 +904,10 @@ def build_datasets(
     train_limit = getattr(args, "train_limit", None)
     progress = getattr(args, "dataset_progress", True)
     max_cache_chunks = None if getattr(args, "max_cache_chunks", 0) <= 0 else int(args.max_cache_chunks)
+    fixed_split_json = getattr(args, "fixed_split_json", None)
+
+    if fixed_split_json is not None and (args.val_files or args.test_files):
+        raise ValueError("--fixed_split_json cannot be used together with --val_files/--test_files")
 
     print("Preparing datasets...", flush=True)
     print("  Loading training dataset", flush=True)
@@ -730,13 +919,13 @@ def build_datasets(
         pos_keys=list(args.pos_keys),
         label_key=args.label_key,
         energy_key=args.energy_key,
-        direction_keys=args.direction_keys if args.enable_direction_regression else None,
+        direction_keys=args.direction_keys,
         stat_file=args.stat_file,
         max_points=args.max_points,
         pool=pool,
         balance_files=balance_train_files,
         filter_amp=args.filter_amp,
-        max_events=train_limit,
+        max_events=None if fixed_split_json is not None else train_limit,
         progress=progress,
         cache_size=args.cache_size,
         max_cache_chunks=max_cache_chunks,
@@ -752,7 +941,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
-            direction_keys=args.direction_keys if args.enable_direction_regression else None,
+            direction_keys=args.direction_keys,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -773,7 +962,7 @@ def build_datasets(
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
-            direction_keys=args.direction_keys if args.enable_direction_regression else None,
+            direction_keys=args.direction_keys,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=pool,
@@ -794,9 +983,13 @@ def build_datasets(
             base_dataset,
             val_fraction=args.val_fraction if need_val_split else 0.0,
             test_fraction=args.test_fraction if need_test_split else 0.0,
+            val_count=args.val_count if need_val_split else None,
+            test_count=args.test_count if need_test_split else None,
             need_val=need_val_split,
             need_test=need_test_split,
             seed=args.split_seed,
+            fixed_split_json=fixed_split_json,
+            train_limit=train_limit,
         )
         if need_val_split:
             val_dataset = split_val_dataset
@@ -1166,7 +1359,7 @@ def main() -> None:
             pos_keys=list(args.pos_keys),
             label_key=args.label_key,
             energy_key=args.energy_key,
-            direction_keys=args.direction_keys if args.enable_direction_regression else None,
+            direction_keys=args.direction_keys,
             stat_file=args.stat_file,
             max_points=args.max_points,
             pool=getattr(args, "pool", 1),

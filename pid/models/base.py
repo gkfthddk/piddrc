@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 @dataclass
@@ -61,7 +62,7 @@ class MultiTaskHead(nn.Module):
     def forward(self, features: torch.Tensor) -> ModelOutputs:
         shared = self.backbone(features)
         logits = self.classifier(shared)
-        energy = self.regressor(shared).squeeze(-1)
+        energy = F.softplus(self.regressor(shared).squeeze(-1))
         log_sigma = self.log_sigma_head(shared).squeeze(-1) if self.log_sigma_head is not None else None
         direction = self.direction_head(shared) if self.direction_head is not None else None
         direction_log_sigma = (

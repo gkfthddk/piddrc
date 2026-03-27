@@ -297,8 +297,9 @@ class Trainer:
                 labels_list.append(effective_batch["labels"].detach().cpu())
                 energy_pred.append(outputs.energy.detach().cpu())
                 energy_true.append(effective_batch["energy"].detach().cpu())
-                if self.config.use_direction_regression and outputs.direction is not None and "direction" in effective_batch:
+                if outputs.direction is not None and "direction" in effective_batch:
                     direction_pred.append(outputs.direction.detach().cpu())
+                if "direction" in effective_batch and (self.config.use_direction_regression or collect_outputs):
                     direction_true.append(effective_batch["direction"].detach().cpu())
                 if collect_outputs and "event_id" in effective_batch:
                     event_id_list.append(effective_batch["event_id"].detach().cpu())
@@ -461,10 +462,15 @@ class Trainer:
                 "logits": logits[idx].tolist(),
                 "energy_pred": float(energy_p[idx].item()),
                 "energy_true": float(energy_t[idx].item()),
+                "E_gen": float(energy_t[idx].item()),
             }
-            if direction_p is not None and direction_t is not None:
-                record["direction_pred"] = direction_p[idx].tolist()
+            if direction_t is not None and idx < direction_t.shape[0]:
+                record["theta"] = float(direction_t[idx][0].item())
+                if direction_t.shape[1] > 1:
+                    record["phi"] = float(direction_t[idx][1].item())
                 record["direction_true"] = direction_t[idx].tolist()
+            if direction_p is not None and idx < direction_p.shape[0]:
+                record["direction_pred"] = direction_p[idx].tolist()
             if log_sigma_tensor is not None:
                 record["log_sigma"] = float(log_sigma_tensor[idx].item())
             if direction_log_sigma_tensor is not None:
@@ -490,7 +496,7 @@ class Trainer:
         energy = batch["energy"]
         loss_cls = nn.functional.cross_entropy(outputs.logits, labels, label_smoothing=self.config.label_smoothing)
         if outputs.log_sigma is not None:
-            log_sigma = outputs.log_sigma.clamp(min=-5.0, max=5.0)
+            log_sigma = outputs.log_sigma.clamp(min=-3.0, max=5.0)
             if(epoch is not None and epoch < self.config.freeze_sigma):
                 log_sigma = torch.zeros_like(log_sigma).detach()
             residual = energy - outputs.energy
@@ -505,7 +511,7 @@ class Trainer:
                 raise RuntimeError("Direction regression enabled but batch has no 'direction' target.")
             residual = batch["direction"] - outputs.direction
             if outputs.direction_log_sigma is not None:
-                direction_log_sigma = outputs.direction_log_sigma.clamp(min=-5.0, max=5.0)
+                direction_log_sigma = outputs.direction_log_sigma.clamp(min=-3.0, max=5.0)
                 if epoch is not None and epoch < self.config.freeze_sigma:
                     direction_log_sigma = torch.zeros_like(direction_log_sigma).detach()
                 loss_dir = 0.5 * torch.exp(-2.0 * direction_log_sigma) * (residual ** 2) + direction_log_sigma
