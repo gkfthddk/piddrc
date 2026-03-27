@@ -63,9 +63,9 @@ def class_prefix(file_name: str) -> str:
 
 def infer_class_to_label(
     records: Sequence[Mapping[str, object]],
-    train_files: Sequence[str],
+    source_files: Sequence[str],
 ) -> Dict[str, int]:
-    names = [class_prefix(f) for f in train_files]
+    names = [class_prefix(f) for f in source_files]
     freq: Dict[int, Counter] = defaultdict(Counter)
     for rec in records:
         label = int(rec["label"])
@@ -143,10 +143,13 @@ def config_label(
 ) -> str:
     if not diff_keys:
         return run_name
+    shown_keys = list(diff_keys[:max_items])
     parts = [
         f"{key}={format_config_value(cfg[key]) if key in cfg else 'missing'}"
-        for key in diff_keys[:max_items]
+        for key in shown_keys
     ]
+    if len(diff_keys) > len(shown_keys):
+        parts.append(f"... +{len(diff_keys) - len(shown_keys)} more")
     if not parts:
         return run_name
     details = wrap_label_text(", ".join(parts), width=width)

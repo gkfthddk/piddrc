@@ -277,6 +277,14 @@ def test_build_datasets_auto_split(dummy_h5, stats_file):
         energy_key="E_gen",
         stat_file=str(stats_file),
         max_points=16,
+        enable_direction_regression=False,
+        direction_keys=None,
+        filter_amp=False,
+        cache_size=16,
+        max_cache_chunks=0,
+        fixed_split_json=None,
+        val_count=None,
+        test_count=None,
         val_fraction=0.25,
         test_fraction=0.25, # this is not used
         split_seed=42,
@@ -313,3 +321,150 @@ def test_build_datasets_auto_split(dummy_h5, stats_file):
     assert train_dataset.indices == train_dataset_b.indices
     assert val_dataset.indices == val_dataset_b.indices
     assert test_dataset.indices == test_dataset_b.indices
+
+
+def test_build_datasets_fixed_split_ignores_mismatched_counts(dummy_h5, stats_file, tmp_path):
+    split_path = tmp_path / "fixed_split.json"
+    payload = {
+        "total_events": 16,
+        "train_indices": list(range(10)),
+        "val_indices": [10, 11, 12],
+        "test_indices": [13, 14, 15],
+    }
+    split_path.write_text(json.dumps(payload))
+
+    args = argparse.Namespace(
+        train_files=dummy_h5,
+        val_files=None,
+        test_files=None,
+        hit_features=HIT_FEATURES,
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        stat_file=str(stats_file),
+        max_points=16,
+        enable_direction_regression=False,
+        direction_keys=None,
+        filter_amp=False,
+        cache_size=16,
+        max_cache_chunks=0,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        val_count=1,
+        test_count=1,
+        split_seed=42,
+        fixed_split_json=split_path,
+        amp_sum_clip_percentile=None,
+        amp_sum_key="DRcalo3dHits.amplitude_sum",
+        is_cherenkov_key="DRcalo3dHits.type",
+        pool=1,
+        balance_train_files=False,
+        train_limit=None,
+        dataset_progress=False,
+    )
+
+    _, train_dataset, val_dataset, test_dataset = run.build_datasets(args)
+
+    assert isinstance(train_dataset, Subset)
+    assert isinstance(val_dataset, Subset)
+    assert isinstance(test_dataset, Subset)
+    assert len(train_dataset) == 10
+    assert len(val_dataset) == 3
+    assert len(test_dataset) == 3
+    assert list(train_dataset.indices) == payload["train_indices"]
+    assert list(val_dataset.indices) == payload["val_indices"]
+    assert list(test_dataset.indices) == payload["test_indices"]
+
+
+def test_build_datasets_projects_classwise_split_to_file_subset(tmp_path, stats_file):
+    def _write_file(path: Path, label: str) -> None:
+        rng = np.random.default_rng(abs(hash(path.name)) % (2**32))
+        with h5py.File(path, "w") as f:
+            for feature in HIT_FEATURES:
+                data = rng.normal(size=(4, 16)).astype(np.float32)
+                f.create_dataset(feature, data=data)
+            f.create_dataset("GenParticles.PDG", data=np.array([label] * 4, dtype="S"))
+            f.create_dataset("E_gen", data=rng.uniform(5, 50, size=4).astype(np.float32))
+            f.create_dataset("C_amp", data=rng.uniform(100, 500, size=4).astype(np.float32))
+            f.create_dataset("S_amp", data=rng.uniform(2000, 8000, size=4).astype(np.float32))
+
+    e_file = tmp_path / "e-_toy.h5"
+    g_file = tmp_path / "gamma_toy.h5"
+    p0_file = tmp_path / "pi0_toy.h5"
+    pp_file = tmp_path / "pi+_toy.h5"
+    _write_file(e_file, "11")
+    _write_file(g_file, "22")
+    _write_file(p0_file, "111")
+    _write_file(pp_file, "211")
+
+    split_path = tmp_path / "classwise_split.json"
+    payload = {
+        "schema": "classwise_fixed_split_v1",
+        "total_events": 16,
+        "class_order": ["e-", "gamma", "pi0", "pi+"],
+        "per_class": {
+            "e-": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 0, "offset_end": 4},
+            "gamma": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 4, "offset_end": 8},
+            "pi0": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 8, "offset_end": 12},
+            "pi+": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 12, "offset_end": 16},
+        },
+        "train_indices": [0, 3, 4, 7, 8, 11, 12, 15],
+        "val_indices": [1, 5, 9, 13],
+        "test_indices": [2, 6, 10, 14],
+    }
+    split_path.write_text(json.dumps(payload))
+
+    args = argparse.Namespace(
+        train_files=[g_file, p0_file],
+        val_files=None,
+        test_files=None,
+        hit_features=HIT_FEATURES,
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        stat_file=str(stats_file),
+        max_points=16,
+        enable_direction_regression=False,
+        direction_keys=None,
+        filter_amp=False,
+        cache_size=16,
+        max_cache_chunks=0,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        val_count=999,
+        test_count=999,
+        split_seed=42,
+        fixed_split_json=split_path,
+        amp_sum_clip_percentile=None,
+        amp_sum_key="DRcalo3dHits.amplitude_sum",
+        is_cherenkov_key="DRcalo3dHits.type",
+        pool=1,
+        balance_train_files=False,
+        train_limit=None,
+        dataset_progress=False,
+    )
+
+    base_dataset, train_dataset, val_dataset, test_dataset = run.build_datasets(args)
+
+    assert isinstance(train_dataset, Subset)
+    assert isinstance(val_dataset, Subset)
+    assert isinstance(test_dataset, Subset)
+    assert len(train_dataset) == 4
+    assert len(val_dataset) == 2
+    assert len(test_dataset) == 2
+
+    train_events = {tuple(base_dataset._indices[int(i)]) for i in train_dataset.indices}
+    val_events = {tuple(base_dataset._indices[int(i)]) for i in val_dataset.indices}
+    test_events = {tuple(base_dataset._indices[int(i)]) for i in test_dataset.indices}
+
+    assert train_events == {(0, 0), (0, 3), (1, 0), (1, 3)}
+    assert val_events == {(0, 1), (1, 1)}
+    assert test_events == {(0, 2), (1, 2)}

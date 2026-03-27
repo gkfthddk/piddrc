@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Any
 
 # --- Global Constants and Configuration ---
-VERSION = "version18"
+VERSION = "version19"
 DEFAULT_STATS_PERCENTILES = (0.5, 0.9, 0.99)
 POOL_SET=[]
 #POOL_SET=[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 28, 56]
@@ -117,6 +117,8 @@ class H5FileProcessor:
         'DRcalo3dHits.amplitude', 'DRcalo3dHits.amplitude_sum', 'DRcalo3dHits.cellID',
         'DRcalo3dHits.position.x', 'DRcalo3dHits.position.y', 'DRcalo3dHits.position.z',
         'DRcalo3dHits.time', 'DRcalo3dHits.time_end', 'DRcalo3dHits.type',
+        'Sim3dCalorimeterHits.energy',
+        'Sim3dCalorimeterHits.position.x', 'Sim3dCalorimeterHits.position.y', 'Sim3dCalorimeterHits.position.z',
         'DRcalo2dHits.amplitude', 'DRcalo2dHits.cellID',
         'DRcalo2dHits.position.x', 'DRcalo2dHits.position.y', 'DRcalo2dHits.position.z',
         'DRcalo2dHits.type',
@@ -124,8 +126,15 @@ class H5FileProcessor:
         'Reco3dHits_C.position.z',
         'Reco3dHits_S.amplitude', 'Reco3dHits_S.position.x', 'Reco3dHits_S.position.y',
         'Reco3dHits_S.position.z',
-        'E_dep', 'E_gen', 'E_leak', 'GenParticles.PDG', 'GenParticles.momentum.phi',
-        'GenParticles.momentum.theta', 'seed', 'S_amp', 'S_raw', 'angle2',
+        'E_dep', 'E_gen', 'E_leak', 
+        'GenParticles.PDG', 'GenParticles.momentum.p',
+        'GenParticles.momentum.phi', 'GenParticles.momentum.theta',
+        'GenParticles.vertex.x', 'GenParticles.vertex.y', 'GenParticles.vertex.z',
+        'G4particles.PDG', 'G4particles.momentum.p', 'G4particles.mass',
+        'G4particles.momentum.phi', 'G4particles.momentum.theta',
+        'G4particles.vertex.x', 'G4particles.vertex.y', 'G4particles.vertex.z',
+        'G4particles.terminal.x', 'G4particles.terminal.y', 'G4particles.terminal.z',
+        'seed', 'S_amp', 'S_raw', 'angle2',
         VERSION,
     ]
 
@@ -656,7 +665,7 @@ def main():
                     sample_name = f"{pid}_{en}GeV_{timing_size}"
                 processor.process_sample(
                     sample_name,
-                    max_num_files=10000,
+                    max_num_files=20000,
                     num_reader_processes=8,
                     overwrite=args.overwrite,
                     check_only=args.check_only,
