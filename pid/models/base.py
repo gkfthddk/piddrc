@@ -35,8 +35,11 @@ class MultiTaskHead(nn.Module):
         use_uncertainty: bool = True,
         use_direction: bool = False,
         direction_dim: int = 2,
+        use_direction_uncertainty: bool | None = None,
     ) -> None:
         super().__init__()
+        if use_direction_uncertainty is None:
+            use_direction_uncertainty = use_uncertainty
         layers: List[nn.Module] = [nn.LayerNorm(in_dim)]
         prev = in_dim
         for hidden in hidden_dims:
@@ -55,7 +58,7 @@ class MultiTaskHead(nn.Module):
         self.direction_head = nn.Linear(prev, direction_dim) if use_direction else None
         self.direction_log_sigma_head = (
             nn.Linear(prev, direction_dim)
-            if (use_direction and use_uncertainty)
+            if (use_direction and use_direction_uncertainty)
             else None
         )
 
@@ -199,6 +202,7 @@ class PointSetAggregator(nn.Module):
         use_uncertainty: bool,
         use_direction: bool = False,
         direction_dim: int = 2,
+        use_direction_uncertainty: bool | None = None,
     ) -> None:
         super().__init__()
         self.pool = MaskedMaxMeanPool(feature_dim)
@@ -212,6 +216,7 @@ class PointSetAggregator(nn.Module):
             use_uncertainty=use_uncertainty,
             use_direction=use_direction,
             direction_dim=direction_dim,
+            use_direction_uncertainty=use_direction_uncertainty,
         )
 
     def forward(self, per_point: torch.Tensor, batch: dict[str, torch.Tensor]) -> ModelOutputs:
