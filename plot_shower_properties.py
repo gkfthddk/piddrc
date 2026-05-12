@@ -14,6 +14,7 @@ python plot_shower_properties.py \
 from __future__ import annotations
 
 import argparse
+import glob
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -86,18 +87,22 @@ def _resolve_paths(patterns: Iterable[str]) -> List[Path]:
     paths: List[Path] = []
     roots = [Path("."), Path("h5s"), Path("/store/ml/dual-readout/h5s")]
     for pattern in patterns:
+        expanded = str(Path(pattern).expanduser())
         found: List[Path] = []
-        for root in roots:
-            found.extend(sorted(root.glob(pattern)))
+        if Path(expanded).is_absolute():
+            found.extend(sorted(Path(p) for p in glob.glob(expanded)))
+        else:
+            for root in roots:
+                found.extend(sorted(root.glob(pattern)))
         if found:
             paths.extend(found)
         else:
-            candidate = Path(pattern)
+            candidate = Path(expanded)
             if candidate.exists():
                 paths.append(candidate)
             else:
                 for root in roots[1:]:
-                    alt = root / pattern
+                    alt = root / expanded
                     if alt.exists():
                         paths.append(alt)
                         break

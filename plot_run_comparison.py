@@ -15,7 +15,6 @@ from typing import Dict, List, Mapping, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import numpy as np
 from sklearn.metrics import roc_auc_score, roc_curve
 from tqdm.auto import tqdm
@@ -87,8 +86,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--show-hdf5-progress",
+        dest="show_hdf5_progress",
         action="store_true",
-        help="Show detailed HDF5 file/chunk progress while loading theta.",
+        default=True,
+        help="Show detailed HDF5 file/chunk progress while loading theta (default: on).",
+    )
+    parser.add_argument(
+        "--hide-hdf5-progress",
+        dest="show_hdf5_progress",
+        action="store_false",
+        help="Hide detailed HDF5 file/chunk progress while loading theta.",
     )
     return parser.parse_args()
 
@@ -320,14 +327,18 @@ def main() -> None:
         )
 
         if config_path.exists() and output_path.exists():
+            tqdm.write(f"[{run_dir.name}] reading config")
             cfg = json.loads(config_path.read_text())
+            tqdm.write(f"[{run_dir.name}] reading output.json ({output_path.stat().st_size / 1024**2:.1f} MB)")
             records = json.loads(output_path.read_text())
+            tqdm.write(f"[{run_dir.name}] converting {len(records)} records")
             labels_np = np.asarray([int(rec["label"]) for rec in records], dtype=np.int64)
             logits = np.asarray([rec["logits"] for rec in records], dtype=np.float64)
             probs = np.exp(logits - np.max(logits, axis=1, keepdims=True))
             probs = probs / np.sum(probs, axis=1, keepdims=True)
             source_files = cfg.get("test_files") or cfg.get("train_files") or []
             class_to_label = infer_class_to_label(records, source_files)
+            tqdm.write(f"[{run_dir.name}] loading theta")
             theta = load_run_theta(
                 run_dir,
                 config_path,
@@ -339,6 +350,7 @@ def main() -> None:
                 cache_dir=cache_dir,
                 show_hdf5_progress=args.show_hdf5_progress,
             )
+            tqdm.write(f"[{run_dir.name}] finished loading theta")
             run_cfgs.append(cfg)
             run_labels_np.append(labels_np)
             run_probs.append(probs)
@@ -398,9 +410,10 @@ def main() -> None:
     print(f"Wrote {out_pair}")
 
     diff_keys = differing_config_keys(run_cfgs, CONFIG_DIFF_EXCLUDE)
-    curve_labels = [
+    config_labels = [
         config_label(name, cfg, diff_keys, width=44) for name, cfg in zip(run_labels, run_cfgs)
     ]
+    curve_labels = run_labels
     for pos, neg in PAIR_SPECS:
         key = pair_key(pos, neg)
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -437,7 +450,7 @@ def main() -> None:
             ("endcap", f"Endcap: theta < {theta_min:.3f} or theta > {theta_max:.3f} rad", "--"),
         ]
 
-        fig, ax = plt.subplots(figsize=(11.5, 6))
+        fig, ax = plt.subplots(figsize=(9.5, 5.8))
         any_region_overlay = False
         for i, (labels_np, probs, class_map, theta) in enumerate(tqdm(list(zip(run_labels_np, run_probs, run_class_maps, run_thetas)), desc=f"{key} overlay runs", unit="run", leave=False)):
             if theta.size == 0:
@@ -472,26 +485,15 @@ def main() -> None:
             ax.set_ylabel("True Positive Rate")
             ax.set_title(f"ROC Curve Comparison by Region: {PAIR_LABELS.get(key, key)}")
             ax.grid(True, linestyle="--", alpha=0.35)
-            run_legend = ax.legend(
+            ax.legend(
                 fontsize=8,
                 labelspacing=0.9,
                 loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
+                bbox_to_anchor=(1.01, 1.0),
                 borderaxespad=0.0,
+                title="Run / region",
             )
-            ax.add_artist(run_legend)
-            style_handles = [
-                Line2D([0], [0], color="black", linestyle="-", linewidth=1.8, label="barrel"),
-                Line2D([0], [0], color="black", linestyle="--", linewidth=1.8, label="endcap"),
-            ]
-            ax.legend(
-                handles=style_handles,
-                title="Region style",
-                loc="upper left",
-                bbox_to_anchor=(1.02, 0.38),
-                borderaxespad=0.0,
-            )
-            fig.tight_layout(rect=(0.0, 0.0, 0.76, 1.0))
+            fig.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
             out_region_overlay = out_dir / f"run_compare_roc_curve_{safe}_barrel_endcap_overlay.png"
             fig.savefig(out_region_overlay, dpi=150)
             print(f"Wrote {out_region_overlay}")
@@ -539,7 +541,7 @@ def main() -> None:
     summary = {
         "runs": run_labels,
         "config_diff_keys": diff_keys,
-        "config_labels": curve_labels,
+        "config_labels": config_labels,
         "test_metrics": metric_rows,
         "pairwise_auc": pair_rows,
         "barrel_theta_min": theta_min,
