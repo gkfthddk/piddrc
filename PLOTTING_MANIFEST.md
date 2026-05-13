@@ -37,6 +37,10 @@ These scripts can be useful in the paper or appendix but should not define the m
 - `plot_longitudinal_observables_summary.py`
   Collects several longitudinal shower observables in one publication-style figure. Useful when a broader shower-observable summary is needed.
 
+- `plot_point_cloud_overview.py`
+  Visualizes the hit-level point cloud distribution for an event. Essential for qualitative verification of shower structure and detector hit patterns.
+
+
 ## Diagnostic / Legacy
 
 These scripts are kept for checks, debugging, and exploratory analysis. They are not required for the current minimum paper result.
@@ -45,7 +49,6 @@ These scripts are kept for checks, debugging, and exploratory analysis. They are
 - `plot_depth_binned_timing_spread_distribution.py`
 - `plot_depth_time_residual_distribution.py`
 - `plot_nearest_neighbor_distance_distribution.py`
-- `plot_point_cloud_overview.py`
 - `plot_raw_charge_time.py`
 - `plot_shower_properties.py`
 - `plot_timing_quantiles.py`
