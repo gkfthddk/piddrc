@@ -146,6 +146,7 @@ class PointSetMLPpp(nn.Module):
         use_uncertainty: bool = True,
         use_direction: bool = False,
         direction_dim: int = 2,
+        use_direction_uncertainty: bool | None = None,
     ) -> None:
         super().__init__()
         self.backbone = PointMLPppEncoder(
@@ -166,6 +167,7 @@ class PointSetMLPpp(nn.Module):
             use_uncertainty=use_uncertainty,
             use_direction=use_direction,
             direction_dim=direction_dim,
+            use_direction_uncertainty=use_direction_uncertainty,
         )
 
     @staticmethod

@@ -30,6 +30,7 @@ class PointSetTransformer(nn.Module):
         use_uncertainty: bool = True,
         use_direction: bool = False,
         direction_dim: int = 2,
+        use_direction_uncertainty: bool | None = None,
     ) -> None:
         super().__init__()
         self.input_proj = nn.Sequential(
@@ -67,6 +68,7 @@ class PointSetTransformer(nn.Module):
             use_uncertainty=use_uncertainty,
             use_direction=use_direction,
             direction_dim=direction_dim,
+            use_direction_uncertainty=use_direction_uncertainty,
         )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> ModelOutputs:

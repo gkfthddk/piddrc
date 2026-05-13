@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import math
 
 import torch
 from torch import nn
@@ -14,6 +15,15 @@ from tqdm.auto import tqdm
 
 from .models.base import ModelOutputs
 from . import metrics as metrics_mod
+
+
+def _find_class_index(class_names: Tuple[str, ...], aliases: Tuple[str, ...]) -> int:
+    normalized = {str(name).strip().lower(): index for index, name in enumerate(class_names)}
+    for alias in aliases:
+        key = str(alias).strip().lower()
+        if key in normalized:
+            return normalized[key]
+    return -1
 
 @dataclass
 class TrainingConfig:
@@ -31,12 +41,17 @@ class TrainingConfig:
     early_stopping_patience: Optional[int] = None
     early_stopping_min_delta: float = 0.0
     early_stopping_monitor: str = "loss"
+    early_stopping_mode: str = "auto"
+    checkpoint_monitor: str = "loss"
+    checkpoint_monitor_mode: str = "auto"
     show_progress: bool = True
     freeze_sigma: int = 0
     profile: bool = False
     profile_dir: str = "profile"
     log_batch_lengths: bool = False
     log_cuda_memory: bool = False
+    collect_eval_predictions: bool = True
+    class_names: Optional[Tuple[str, ...]] = None
 
 
 class Trainer:
@@ -63,9 +78,13 @@ class Trainer:
     # ------------------------------------------------------------------
     def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> Dict[str, List[Dict[str, float]]]:
         history: Dict[str, List[Dict[str, float]]] = {"train": [], "val": []}
-        best_loss = float("inf")
+        best_early_value = None
+        best_checkpoint_value = None
         epochs_without_improvement = 0
-        monitor_metric = self.config.early_stopping_monitor or "loss"
+        early_monitor_metric = self.config.early_stopping_monitor or "loss"
+        checkpoint_monitor_metric = self.config.checkpoint_monitor or early_monitor_metric or "loss"
+        early_mode = self._resolve_monitor_mode(early_monitor_metric, self.config.early_stopping_mode)
+        checkpoint_mode = self._resolve_monitor_mode(checkpoint_monitor_metric, self.config.checkpoint_monitor_mode)
         for epoch in range(1, self.config.epochs + 1):
             train_metrics = self._run_epoch(train_loader, training=True, epoch=epoch)
             history["train"].append(train_metrics)
@@ -80,13 +99,34 @@ class Trainer:
             else:
                 monitored_metrics = train_metrics
 
+            checkpoint_value = self._select_monitor_value(monitored_metrics, checkpoint_monitor_metric)
+            checkpoint_improved = self._is_improved(
+                checkpoint_value,
+                best_checkpoint_value,
+                checkpoint_mode,
+                self.config.early_stopping_min_delta,
+            )
+            if checkpoint_improved:
+                best_checkpoint_value = checkpoint_value
+                if self.config.checkpoint_path:
+                    payload = {
+                        "model_state": self.model.state_dict(),
+                        "optimizer_state": self.optimizer.state_dict(),
+                    }
+                    torch.save(payload, self.config.checkpoint_path)
+                    metric_text = f"{checkpoint_monitor_metric}={checkpoint_value:.6f}" if checkpoint_value is not None else checkpoint_monitor_metric
+                    print(f"Epoch {epoch}: Checkpoint saved to {self.config.checkpoint_path} ({metric_text})")
+
             if self.config.early_stopping_patience is not None:
-                monitored_value = monitored_metrics.get(monitor_metric)
-                if monitored_value is None:
-                    monitored_value = monitored_metrics.get("loss")
+                monitored_value = self._select_monitor_value(monitored_metrics, early_monitor_metric)
                 if monitored_value is not None:
-                    if monitored_value + self.config.early_stopping_min_delta < best_loss:
-                        best_loss = monitored_value
+                    if self._is_improved(
+                        monitored_value,
+                        best_early_value,
+                        early_mode,
+                        self.config.early_stopping_min_delta,
+                    ):
+                        best_early_value = monitored_value
                         epochs_without_improvement = 0
                     else:
                         epochs_without_improvement += 1
@@ -98,14 +138,6 @@ class Trainer:
                 warmup_steps = self.config.warmup_steps
                 if warmup_steps <= 0 or self._global_step >= warmup_steps:
                     self.scheduler.step()
-
-            if self.config.checkpoint_path and epoch % self.config.log_every == 0:
-                payload = {
-                    "model_state": self.model.state_dict(),
-                    "optimizer_state": self.optimizer.state_dict(),
-                }
-                torch.save(payload, self.config.checkpoint_path)
-                print(f"Epoch {epoch}: Checkpoint saved to {self.config.checkpoint_path}")
 
         return history
 
@@ -144,7 +176,7 @@ class Trainer:
             )
         else:
             iterator = data_loader
-        stream_metrics_only = (not training) and (not collect_outputs)
+        stream_metrics_only = (not training) and (not collect_outputs) and (not self.config.collect_eval_predictions)
         losses: List[float] = []
         cls_losses: List[float] = []
         reg_losses: List[float] = []
@@ -479,6 +511,42 @@ class Trainer:
 
         return metrics, output_records
 
+    def _resolve_monitor_mode(self, metric_name: str, configured_mode: str | None) -> str:
+        mode = (configured_mode or "auto").lower()
+        if mode in {"min", "max"}:
+            return mode
+        metric = (metric_name or "loss").lower()
+        if any(token in metric for token in ("loss", "rmse", "mse", "error")):
+            return "min"
+        return "max"
+
+    def _select_monitor_value(self, metrics: Dict[str, float], metric_name: str) -> Optional[float]:
+        value = metrics.get(metric_name)
+        if value is None or not math.isfinite(float(value)):
+            metric = (metric_name or "loss").lower()
+            if metric in {"loss", "classification_loss", "regression_loss", "direction_loss"}:
+                fallback = metrics.get("loss")
+                if fallback is None or not math.isfinite(float(fallback)):
+                    return None
+                return float(fallback)
+            return None
+        return float(value)
+
+    def _is_improved(
+        self,
+        current_value: Optional[float],
+        best_value: Optional[float],
+        mode: str,
+        min_delta: float,
+    ) -> bool:
+        if current_value is None:
+            return False
+        if best_value is None:
+            return True
+        if mode == "max":
+            return current_value > best_value + min_delta
+        return current_value < best_value - min_delta
+
     def _apply_warmup(self) -> None:
         warmup_steps = self.config.warmup_steps
         if warmup_steps <= 0:
@@ -515,6 +583,9 @@ class Trainer:
                 if epoch is not None and epoch < self.config.freeze_sigma:
                     direction_log_sigma = torch.zeros_like(direction_log_sigma).detach()
                 loss_dir = 0.5 * torch.exp(-2.0 * direction_log_sigma) * (residual ** 2) + direction_log_sigma
+                # Keep the auxiliary direction objective from driving the total
+                # loss negative when the model predicts very small uncertainty.
+                loss_dir = loss_dir.clamp_min(0.0)
                 loss_dir = loss_dir.mean()
             else:
                 loss_dir = nn.functional.mse_loss(outputs.direction, batch["direction"])
@@ -575,10 +646,45 @@ class Trainer:
 
         metrics: Dict[str, float] = {}
         metrics["accuracy"] = metrics_mod.accuracy(logits, labels)
+        macro_recall = metrics_mod.macro_recall(logits, labels)
+        if macro_recall is not None:
+            metrics["macro_recall"] = macro_recall
         auc = metrics_mod.roc_auc(logits, labels)
         if auc is not None:
             metrics["roc_auc"] = auc
             metrics["classification_auc"] = auc
+        class_names = tuple(str(name) for name in (self.config.class_names or ()))
+        if class_names:
+            gamma_index = _find_class_index(class_names, ("gamma", "22"))
+            pi0_index = _find_class_index(class_names, ("pi0", "111"))
+            if gamma_index >= 0 and pi0_index >= 0:
+                pair_auc = metrics_mod.pairwise_roc_auc(logits, labels, gamma_index, pi0_index)
+                if pair_auc is not None:
+                    metrics["pi0_gamma_auc"] = pair_auc
+                recall_gamma = metrics_mod.class_recall(logits, labels, gamma_index)
+                recall_pi0 = metrics_mod.class_recall(logits, labels, pi0_index)
+                if recall_gamma is not None:
+                    metrics["gamma_recall"] = recall_gamma
+                if recall_pi0 is not None:
+                    metrics["pi0_recall"] = recall_pi0
+                if recall_gamma is not None and recall_pi0 is not None:
+                    imbalance = abs(recall_pi0 - recall_gamma)
+                    metrics["pi0_gamma_recall_imbalance"] = float(imbalance)
+                macro_auc = metrics.get("classification_auc")
+                if (
+                    macro_auc is not None
+                    and "pi0_gamma_auc" in metrics
+                    and "pi0_gamma_recall_imbalance" in metrics
+                ):
+                    recall_term = metrics.get("macro_recall")
+                    if recall_term is None:
+                        recall_term = float(metrics["accuracy"])
+                    metrics["pid_checkpoint_score"] = float(
+                        0.45 * float(macro_auc)
+                        + 0.35 * float(metrics["pi0_gamma_auc"])
+                        + 0.15 * float(recall_term)
+                        - 0.15 * float(metrics["pi0_gamma_recall_imbalance"])
+                    )
         resolution = metrics_mod.energy_resolution(energy_p, energy_t)
         metrics["energy_resolution"] = resolution["resolution"]
         metrics["energy_rmse"] = resolution["rmse"]

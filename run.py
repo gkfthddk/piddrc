@@ -431,6 +431,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable the log-variance regression head",
     )
+    model_group.add_argument(
+        "--disable_direction_uncertainty",
+        dest="disable_direction_uncertainty",
+        action="store_true",
+        help="Disable the uncertainty head for direction regression while keeping energy uncertainty enabled.",
+    )
+    model_group.add_argument(
+        "--enable_direction_uncertainty",
+        dest="disable_direction_uncertainty",
+        action="store_false",
+        help="Enable the uncertainty head for direction regression.",
+    )
+    parser.set_defaults(disable_direction_uncertainty=True)
 
     train_group = parser.add_argument_group("Optimisation")
     train_group.add_argument("--batch_size", type=int, default=64)
@@ -452,6 +465,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     train_group.add_argument("--lr_scheduler", type=str, default=None, choices=["cosine", "step", "exponential"])
     train_group.add_argument("--log_every", type=int, default=10)
     train_group.add_argument("--max_grad_norm", type=float, default=5.0)
+    train_group.add_argument(
+        "--checkpoint_monitor",
+        type=str,
+        default="loss",
+        help="Metric used to decide when to save the best checkpoint (e.g. loss, accuracy, roc_auc, pid_checkpoint_score).",
+    )
+    train_group.add_argument(
+        "--checkpoint_monitor_mode",
+        type=str,
+        default="auto",
+        choices=("auto", "min", "max"),
+        help="Whether the checkpoint monitor should be minimized or maximized. 'auto' infers the direction from the metric name.",
+    )
+    train_group.add_argument(
+        "--early_stopping_monitor",
+        type=str,
+        default="loss",
+        help="Metric used for early stopping. Defaults to loss; can be set to accuracy, roc_auc, pid_checkpoint_score, etc.",
+    )
+    train_group.add_argument(
+        "--early_stopping_mode",
+        type=str,
+        default="auto",
+        choices=("auto", "min", "max"),
+        help="Whether the early-stopping monitor should be minimized or maximized. 'auto' infers the direction from the metric name.",
+    )
     train_group.add_argument(
         "--direction_weight",
         type=float,
@@ -758,9 +797,16 @@ def _split_dataset(
     train_indices_random: list[int] | None = None
     val_indices_random: list[int] | None = None
     test_indices_random: list[int] | None = None
+    train_limit_class_order: list[str] | None = None
 
     if fixed_split_json is not None and fixed_split_json.exists():
         fixed_split_payload = json.loads(fixed_split_json.read_text())
+        payload_class_order = fixed_split_payload.get("class_order")
+        if isinstance(payload_class_order, list):
+            dataset_files = getattr(dataset, "files", ())
+            present_classes = {_infer_file_class(str(path)) for path in dataset_files}
+            filtered = [str(name) for name in payload_class_order if str(name) in present_classes]
+            train_limit_class_order = filtered or [str(name) for name in payload_class_order]
         projected = _project_classwise_split(fixed_split_payload)
         if projected is not None:
             train_indices_random, val_indices_random, test_indices_random = projected
@@ -852,7 +898,55 @@ def _split_dataset(
         return dataset, None, None
 
     if train_limit is not None and train_limit > 0:
-        train_indices_random = train_indices_random[: min(int(train_limit), len(train_indices_random))]
+        requested_limit = int(train_limit)
+        if (
+            fixed_split_payload is not None
+            and isinstance(fixed_split_payload.get("per_class"), dict)
+            and train_limit_class_order
+        ):
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+            raw_indices = getattr(dataset, "_indices", None)
+            dataset_files = getattr(dataset, "files", None)
+            if raw_indices is not None and dataset_files is not None:
+                file_to_class = {
+                    int(file_id): _infer_file_class(str(file_path))
+                    for file_id, file_path in enumerate(dataset_files)
+                }
+                buckets: Dict[str, list[int]] = {class_name: [] for class_name in train_limit_class_order}
+                for dataset_index in train_indices_random:
+                    file_id = int(raw_indices[int(dataset_index)][0])
+                    class_name = file_to_class.get(file_id)
+                    if class_name in buckets:
+                        buckets[class_name].append(int(dataset_index))
+
+                active_class_order = [class_name for class_name in train_limit_class_order if buckets.get(class_name)]
+                if active_class_order:
+                    shuffled_buckets: Dict[str, list[int]] = {}
+                    for class_name in active_class_order:
+                        indices = buckets[class_name]
+                        perm = torch.randperm(len(indices), generator=generator).tolist()
+                        shuffled_buckets[class_name] = [indices[i] for i in perm]
+
+                    selected_by_class = {
+                        class_name: shuffled_buckets[class_name][: min(requested_limit, len(shuffled_buckets[class_name]))]
+                        for class_name in active_class_order
+                    }
+
+                    train_indices_random = [
+                        idx for class_name in active_class_order for idx in selected_by_class[class_name]
+                    ]
+                    print(
+                        "  Applied class-balanced per-class train_limit selection: "
+                        + ", ".join(f"{class_name}={len(selected_by_class[class_name])}" for class_name in active_class_order),
+                        flush=True,
+                    )
+                else:
+                    train_indices_random = train_indices_random[: min(requested_limit, len(train_indices_random))]
+            else:
+                train_indices_random = train_indices_random[: min(requested_limit, len(train_indices_random))]
+        else:
+            train_indices_random = train_indices_random[: min(requested_limit, len(train_indices_random))]
 
     train_indices_list = list(train_indices_random)
     val_indices_list = list(val_indices_random)
@@ -1049,6 +1143,9 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
     summary_dim = dataset[0].summary.numel()
     in_channels = len(dataset.hit_features)
     num_classes = len(dataset.classes)
+    enable_direction_regression = bool(getattr(args, "enable_direction_regression", False))
+    direction_keys = tuple(getattr(args, "direction_keys", ()) or ())
+    disable_direction_uncertainty = bool(getattr(args, "disable_direction_uncertainty", True))
 
     common_kwargs: Dict[str, Any] = {
         "in_channels": in_channels,
@@ -1058,8 +1155,9 @@ def build_model(args: argparse.Namespace, dataset: DualReadoutEventDataset) -> n
         "dropout": args.dropout,
         "use_summary": not args.disable_summary,
         "use_uncertainty": not args.disable_uncertainty,
-        "use_direction": args.enable_direction_regression,
-        "direction_dim": len(args.direction_keys),
+        "use_direction": enable_direction_regression,
+        "direction_dim": len(direction_keys),
+        "use_direction_uncertainty": not disable_direction_uncertainty,
     }
 
     if model_name == "mlp":
@@ -1232,6 +1330,11 @@ def configure_trainer(
     profile_dir: Path | None,
     log_batch_lengths: bool,
     log_cuda_memory: bool,
+    checkpoint_monitor: str,
+    checkpoint_monitor_mode: str,
+    early_stopping_monitor: str,
+    early_stopping_mode: str,
+    class_names: tuple[str, ...],
 ) -> Tuple[Trainer, torch.optim.Optimizer]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     config = TrainingConfig(
@@ -1246,12 +1349,17 @@ def configure_trainer(
         use_direction_regression=use_direction_regression,
         checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
         show_progress=show_progress,
-        early_stopping_patience=5,
+        early_stopping_patience=10,
+        early_stopping_monitor=early_stopping_monitor,
+        early_stopping_mode=early_stopping_mode,
+        checkpoint_monitor=checkpoint_monitor,
+        checkpoint_monitor_mode=checkpoint_monitor_mode,
         freeze_sigma=freeze_sigma,
         profile=profile,
         profile_dir=str(profile_dir) if profile_dir else "profile",
         log_batch_lengths=log_batch_lengths,
         log_cuda_memory=log_cuda_memory,
+        class_names=class_names,
     )
 
     scheduler = None
@@ -1495,6 +1603,11 @@ def main() -> None:
             profile_dir=args.profile_dir,
             log_batch_lengths=args.log_batch_lengths,
             log_cuda_memory=args.log_cuda_memory,
+            checkpoint_monitor=args.checkpoint_monitor,
+            checkpoint_monitor_mode=args.checkpoint_monitor_mode,
+            early_stopping_monitor=args.early_stopping_monitor,
+            early_stopping_mode=args.early_stopping_mode,
+            class_names=tuple(str(c) for c in base_dataset.classes),
         )
 
         if args.checkpoint is not None and args.eval_only:
@@ -1527,7 +1640,8 @@ def main() -> None:
 
         history = trainer.fit(train_loader, val_loader)
         maybe_save_history(history, args.history_json)
-        maybe_save_checkpoint(model, optimizer, args.checkpoint)
+        if args.checkpoint is not None and args.checkpoint.exists():
+            maybe_load_checkpoint(model, optimizer, args.checkpoint)
 
         evaluation_loaders: Dict[str, DataLoader] = {}
         if val_loader is not None:

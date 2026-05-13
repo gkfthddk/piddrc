@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader, Subset
 
 from pid.data import DualReadoutEventDataset, collate_events
 from pid.engine import Trainer, TrainingConfig
+from pid.models.base import ModelOutputs
 from pid.models.mlp import SummaryMLP
 from pid.models.pointset_mlp import PointSetMLP
 from pid.models.pointset_mamba import PointSetMamba
@@ -123,9 +124,18 @@ def test_collate_and_models(pipeline_dataset):
     outputs = transformer(batch)
     assert outputs.logits.shape == (4, num_classes)
 
-    if importlib.util.find_spec("mamba_ssm") is not None:
-        point_mamba = PointSetMamba(in_channels=batch["points"].shape[-1], summary_dim=summary_dim, num_classes=num_classes)
-        outputs = point_mamba(batch)
+    if importlib.util.find_spec("mamba_ssm") is not None and torch.cuda.is_available():
+        device = torch.device("cuda")
+        point_mamba = PointSetMamba(
+            in_channels=batch["points"].shape[-1],
+            summary_dim=summary_dim,
+            num_classes=num_classes,
+        ).to(device)
+        cuda_batch = {
+            key: value.to(device) if isinstance(value, torch.Tensor) else value
+            for key, value in batch.items()
+        }
+        outputs = point_mamba(cuda_batch)
         assert outputs.logits.shape == (4, num_classes)
 
 
@@ -143,6 +153,213 @@ def test_trainer_step(pipeline_dataset):
     metrics = history["train"][0]
     assert "loss" in metrics
     assert "accuracy" in metrics
+
+
+def test_trainer_eval_computes_auc_by_default():
+    class ToyModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            labels = batch["labels"]
+            logits = torch.stack([1.0 - labels.float(), labels.float()], dim=1) + self.dummy * 0.0
+            return ModelOutputs(
+                logits=logits,
+                energy=batch["energy"],
+                log_sigma=None,
+                direction=None,
+                direction_log_sigma=None,
+                extras={},
+            )
+
+    def collate_labels(items):
+        labels = torch.tensor(items, dtype=torch.long)
+        return {"labels": labels, "energy": torch.ones_like(labels, dtype=torch.float32)}
+
+    model = ToyModel()
+    loader = torch.utils.data.DataLoader([0, 1, 0, 1], batch_size=2, collate_fn=collate_labels)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(epochs=1, log_every=1, use_amp=False),
+    )
+
+    metrics = trainer.evaluate(loader)
+
+    assert "roc_auc" in metrics
+    assert np.isfinite(metrics["roc_auc"])
+
+
+def test_trainer_eval_computes_pid_checkpoint_score():
+    class ToyModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            labels = batch["labels"]
+            logits = torch.full((labels.shape[0], 4), -1.0, dtype=torch.float32)
+            logits[torch.arange(labels.shape[0]), labels] = 2.0
+            logits = logits + self.dummy * 0.0
+            return ModelOutputs(
+                logits=logits,
+                energy=batch["energy"],
+                log_sigma=None,
+                direction=None,
+                direction_log_sigma=None,
+                extras={},
+            )
+
+    def collate_labels(items):
+        labels = torch.tensor(items, dtype=torch.long)
+        return {"labels": labels, "energy": torch.ones_like(labels, dtype=torch.float32)}
+
+    model = ToyModel()
+    loader = torch.utils.data.DataLoader([0, 1, 2, 3, 1, 2], batch_size=3, collate_fn=collate_labels)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(
+            epochs=1,
+            log_every=1,
+            use_amp=False,
+            class_names=("e-", "gamma", "pi0", "pi+"),
+        ),
+    )
+
+    metrics = trainer.evaluate(loader)
+
+    assert "pi0_gamma_auc" in metrics
+    assert "pid_checkpoint_score" in metrics
+    assert np.isfinite(metrics["pid_checkpoint_score"])
+    assert "macro_recall" in metrics
+
+
+def test_trainer_eval_computes_pid_checkpoint_score_for_numeric_class_names():
+    class ToyModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            labels = batch["labels"]
+            logits = torch.full((labels.shape[0], 4), -1.0, dtype=torch.float32)
+            logits[torch.arange(labels.shape[0]), labels] = 2.0
+            logits = logits + self.dummy * 0.0
+            return ModelOutputs(
+                logits=logits,
+                energy=batch["energy"],
+                log_sigma=None,
+                direction=None,
+                direction_log_sigma=None,
+                extras={},
+            )
+
+    def collate_labels(items):
+        labels = torch.tensor(items, dtype=torch.long)
+        return {"labels": labels, "energy": torch.ones_like(labels, dtype=torch.float32)}
+
+    model = ToyModel()
+    loader = torch.utils.data.DataLoader([0, 1, 2, 3, 1, 2], batch_size=3, collate_fn=collate_labels)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(
+            epochs=1,
+            log_every=1,
+            use_amp=False,
+            class_names=("11", "22", "111", "211"),
+        ),
+    )
+
+    metrics = trainer.evaluate(loader)
+
+    assert "pi0_gamma_auc" in metrics
+    assert "pid_checkpoint_score" in metrics
+    assert np.isfinite(metrics["pid_checkpoint_score"])
+    assert "macro_recall" in metrics
+
+
+def test_trainer_monitor_does_not_fallback_to_loss_for_custom_metric():
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(epochs=1, log_every=1, use_amp=False),
+    )
+
+    metrics = {"loss": 1.23, "accuracy": 0.75}
+
+    assert trainer._select_monitor_value(metrics, "pid_checkpoint_score") is None
+    assert trainer._select_monitor_value(metrics, "loss") == pytest.approx(1.23)
+
+
+def test_amp_summary_does_not_require_type_when_c_amp_and_s_amp_exist():
+    dataset = DualReadoutEventDataset.__new__(DualReadoutEventDataset)
+    dataset.is_cherenkov_key = "DRcalo3dHits.type"
+    dataset.amp_sum_key = "DRcalo3dHits.amplitude_sum"
+
+    points = np.zeros((2, 4, 6), dtype=np.float32)
+    index_map = {
+        "DRcalo3dHits.amplitude_sum": 0,
+        "DRcalo3dHits.time": 1,
+        "DRcalo3dHits.time_end": 2,
+        "DRcalo3dHits.position.x": 3,
+        "DRcalo3dHits.position.y": 4,
+        "DRcalo3dHits.position.z": 5,
+    }
+    c_amp = np.array([1.0, 2.0], dtype=np.float32)
+    s_amp = np.array([3.0, 4.0], dtype=np.float32)
+
+    summary = dataset._amp_summary(c_amp, s_amp, points, index_map)
+
+    assert summary.shape == (2, 3)
+    np.testing.assert_allclose(summary[:, 0], c_amp)
+    np.testing.assert_allclose(summary[:, 1], s_amp)
+    np.testing.assert_allclose(summary[:, 2], c_amp + s_amp)
+
+
+def test_direction_loss_is_clamped_non_negative() -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    trainer = Trainer(
+        model,
+        optimizer,
+        device=torch.device("cpu"),
+        config=TrainingConfig(
+            epochs=1,
+            log_every=1,
+            use_amp=False,
+            use_direction_regression=True,
+            freeze_sigma=0,
+        ),
+    )
+    batch = {
+        "labels": torch.tensor([0, 1], dtype=torch.long),
+        "energy": torch.tensor([1.0, 2.0], dtype=torch.float32),
+        "direction": torch.zeros((2, 2), dtype=torch.float32),
+    }
+    outputs = ModelOutputs(
+        logits=torch.zeros((2, 2), dtype=torch.float32),
+        energy=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        direction=torch.zeros((2, 2), dtype=torch.float32),
+        log_sigma=torch.zeros(2, dtype=torch.float32),
+        direction_log_sigma=torch.full((2, 2), -3.0, dtype=torch.float32),
+        extras={},
+    )
+
+    _, _, loss_dir = trainer._compute_losses(outputs, batch)
+
+    assert float(loss_dir.item()) >= 0.0
 
 
 def test_build_model_infers_mamba_backend_from_model_choice(monkeypatch):
@@ -185,6 +402,47 @@ def test_build_model_infers_mamba_backend_from_model_choice(monkeypatch):
 
     assert isinstance(model, RecordingMamba)
     assert model.backend == "mamba2"
+
+
+def test_build_model_can_disable_direction_uncertainty() -> None:
+    class DummyRecord:
+        def __init__(self) -> None:
+            self.summary = torch.zeros(5)
+
+    class DummyDataset:
+        hit_features = ("f1", "f2", "f3")
+        classes = ("a", "b")
+
+        def __getitem__(self, index: int) -> DummyRecord:
+            return DummyRecord()
+
+    args = argparse.Namespace(
+        model="mlp",
+        hidden_dim=32,
+        depth=2,
+        num_heads=4,
+        mlp_expansion=4.0,
+        k_neighbors=16,
+        head_hidden=(128, 64),
+        dropout=0.1,
+        disable_summary=False,
+        disable_uncertainty=False,
+        disable_direction_uncertainty=True,
+        enable_direction_regression=True,
+        direction_keys=("theta", "phi"),
+    )
+
+    model = run.build_model(args, DummyDataset())
+    batch = {
+        "points": torch.zeros((2, 4, 3), dtype=torch.float32),
+        "mask": torch.ones((2, 4), dtype=torch.bool),
+        "summary": torch.zeros((2, 5), dtype=torch.float32),
+    }
+    outputs = model(batch)
+
+    assert outputs.direction is not None
+    assert outputs.log_sigma is not None
+    assert outputs.direction_log_sigma is None
 
 
 def test_instance_name_sets_default_artifact_paths(dummy_h5, monkeypatch):
@@ -468,3 +726,89 @@ def test_build_datasets_projects_classwise_split_to_file_subset(tmp_path, stats_
     assert train_events == {(0, 0), (0, 3), (1, 0), (1, 3)}
     assert val_events == {(0, 1), (1, 1)}
     assert test_events == {(0, 2), (1, 2)}
+
+
+def test_build_datasets_classwise_train_limit_is_per_class(tmp_path, stats_file):
+    def _write_file(path: Path, label: str) -> None:
+        rng = np.random.default_rng(abs(hash(path.name)) % (2**32))
+        with h5py.File(path, "w") as f:
+            for feature in HIT_FEATURES:
+                data = rng.normal(size=(4, 16)).astype(np.float32)
+                f.create_dataset(feature, data=data)
+            f.create_dataset("GenParticles.PDG", data=np.array([label] * 4, dtype="S"))
+            f.create_dataset("E_gen", data=rng.uniform(5, 50, size=4).astype(np.float32))
+            f.create_dataset("C_amp", data=rng.uniform(100, 500, size=4).astype(np.float32))
+            f.create_dataset("S_amp", data=rng.uniform(2000, 8000, size=4).astype(np.float32))
+
+    e_file = tmp_path / "e-_toy.h5"
+    g_file = tmp_path / "gamma_toy.h5"
+    p0_file = tmp_path / "pi0_toy.h5"
+    pp_file = tmp_path / "pi+_toy.h5"
+    _write_file(e_file, "11")
+    _write_file(g_file, "22")
+    _write_file(p0_file, "111")
+    _write_file(pp_file, "211")
+
+    split_path = tmp_path / "classwise_split.json"
+    payload = {
+        "schema": "classwise_fixed_split_v1",
+        "total_events": 16,
+        "class_order": ["e-", "gamma", "pi0", "pi+"],
+        "per_class": {
+            "e-": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 0, "offset_end": 4},
+            "gamma": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 4, "offset_end": 8},
+            "pi0": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 8, "offset_end": 12},
+            "pi+": {"total": 4, "train": 2, "val": 1, "test": 1, "offset_start": 12, "offset_end": 16},
+        },
+        "train_indices": [0, 3, 4, 7, 8, 11, 12, 15],
+        "val_indices": [1, 5, 9, 13],
+        "test_indices": [2, 6, 10, 14],
+    }
+    split_path.write_text(json.dumps(payload))
+
+    args = argparse.Namespace(
+        train_files=[e_file, g_file, p0_file, pp_file],
+        val_files=None,
+        test_files=None,
+        hit_features=HIT_FEATURES,
+        pos_keys=(
+            "DRcalo3dHits.position.x",
+            "DRcalo3dHits.position.y",
+            "DRcalo3dHits.position.z",
+        ),
+        label_key="GenParticles.PDG",
+        energy_key="E_gen",
+        stat_file=str(stats_file),
+        max_points=16,
+        enable_direction_regression=False,
+        direction_keys=None,
+        filter_amp=False,
+        cache_size=16,
+        max_cache_chunks=0,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        val_count=999,
+        test_count=999,
+        split_seed=42,
+        fixed_split_json=split_path,
+        amp_sum_clip_percentile=None,
+        amp_sum_key="DRcalo3dHits.amplitude_sum",
+        is_cherenkov_key="DRcalo3dHits.type",
+        pool=1,
+        balance_train_files=False,
+        train_limit=1,
+        dataset_progress=False,
+    )
+
+    base_dataset, train_dataset, val_dataset, test_dataset = run.build_datasets(args)
+
+    assert isinstance(train_dataset, Subset)
+    assert isinstance(val_dataset, Subset)
+    assert isinstance(test_dataset, Subset)
+    assert len(train_dataset) == 4
+    assert len(val_dataset) == 4
+    assert len(test_dataset) == 4
+
+    train_events = [tuple(base_dataset._indices[int(i)]) for i in train_dataset.indices]
+    train_file_ids = sorted(int(file_id) for file_id, _ in train_events)
+    assert train_file_ids == [0, 1, 2, 3]

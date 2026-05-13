@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
+import matplotlib as mpl
 import numpy as np
 
 
@@ -93,10 +94,27 @@ def is_simple_value(value: object) -> bool:
     return False
 
 
-def format_config_value(value: object) -> str:
+def _short_config_scalar(value: object) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    if "/" in value:
+        value = Path(value).name
+    if value.startswith("DRcalo3dHits."):
+        value = value.replace("DRcalo3dHits.", "")
+    if value.startswith("GenParticles."):
+        value = value.replace("GenParticles.", "")
+    if len(value) > 36:
+        value = value[:33] + "..."
+    return value
+
+
+def format_config_value(value: object, *, max_list_items: int = 3) -> str:
     if isinstance(value, (list, tuple)):
-        return "[" + ",".join(str(item) for item in value) + "]"
-    return str(value)
+        shown = [_short_config_scalar(item) for item in value[:max_list_items]]
+        if len(value) > max_list_items:
+            shown.append(f"...+{len(value) - max_list_items}")
+        return "[" + ",".join(shown) + "]"
+    return _short_config_scalar(value)
 
 
 def differing_config_keys(
@@ -154,3 +172,20 @@ def config_label(
         return run_name
     details = wrap_label_text(", ".join(parts), width=width)
     return f"{run_name}\n{details}"
+
+
+def set_publication_style() -> None:
+    mpl.rcParams.update(
+        {
+            "font.size": 12,
+            "axes.labelsize": 14,
+            "axes.titlesize": 14,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 11,
+            "figure.titlesize": 15,
+            "savefig.dpi": 300,
+            "figure.dpi": 100,
+            "axes.grid": False,
+        }
+    )

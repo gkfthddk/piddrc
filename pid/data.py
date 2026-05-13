@@ -463,8 +463,10 @@ class DualReadoutEventDataset(Dataset):
                 # File handle is now closed. This is safe.
             except Exception as e:
                 self._log(f"ERROR: Worker {worker_id} failed to load chunk {cache_key} from {self.files[file_id]}: {e}")
-                # Fallback: get a different item (use modulo for safety)
-                return self.__getitem__((index + 1) % len(self))
+                if isinstance(e, (OSError, IOError)):
+                    # Best-effort retry for transient filesystem issues only.
+                    return self.__getitem__((index + 1) % len(self))
+                raise
         else:
             worker_cache.move_to_end(cache_key)
         # --- 3. Retrieve event from cache ---
@@ -484,7 +486,9 @@ class DualReadoutEventDataset(Dataset):
         start = chunk_start
         stop = min(start + self.cache_size, len(handle[self.label_key]))
         hits = [np.asarray(handle[feature][start:stop,:self.max_points]/self.feature_max[feature], dtype=np.float32) for feature in self.hit_features]
-        cid=handle[self.cid_key][start:stop,:self.max_points]
+        cid = None
+        if self.cid_key in handle:
+            cid = handle[self.cid_key][start:stop, : self.max_points]
         points = np.stack(hits, axis=-1)
 
         def _read_optional(dataset_name: str) -> float:
@@ -526,7 +530,7 @@ class DualReadoutEventDataset(Dataset):
 
     def _load_event(self, chunk: Mapping[str, Any], local_index: int, file_id: int, event_id: int) -> EventRecord:
         points = chunk["points"][local_index]
-        cid = chunk["cid"][local_index]
+        cid = chunk["cid"][local_index] if chunk.get("cid") is not None else None
         label_value = chunk["label_value"][local_index]
         summary = chunk["summary"][local_index]
         energy = chunk["energy"][local_index]
@@ -562,7 +566,7 @@ class DualReadoutEventDataset(Dataset):
             direction=torch.from_numpy(np.atleast_1d(direction)) if direction is not None else None,
             event_id=(file_id, event_id),
             pos=pos_tensor,
-            cid=torch.from_numpy(np.asarray(cid)),
+            cid=torch.from_numpy(np.asarray(cid)) if cid is not None else None,
         )
 
     # ------------------------------------------------------------------
@@ -767,18 +771,26 @@ class DualReadoutEventDataset(Dataset):
     # ------------------------------------------------------------------
     # Summary feature engineering
     # ------------------------------------------------------------------
+    def _feature_column(self, points: np.ndarray, index_map: Mapping[str, int], feature_name: str) -> np.ndarray:
+        if feature_name not in index_map:
+            raise KeyError(
+                f"Required summary feature '{feature_name}' is not present in hit_features. "
+                "Either include it in --hit_features or switch to a summary that does not require it."
+            )
+        return points[..., index_map[feature_name]]
+
     def _amp_summary(self, C_amp: list, S_amp: list, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute simple amplitude-based summary features for one event."""
-
-        is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
         if C_amp is not None:
             c_sum = C_amp
         else:
+            is_cherenkov = self._feature_column(points, index_map, self.is_cherenkov_key).astype(bool)
             c = points[is_cherenkov, index_map[self.amp_sum_key]]
             c_sum = float(np.sum(c))
         if S_amp is not None:
             s_sum = S_amp
         else:
+            is_cherenkov = self._feature_column(points, index_map, self.is_cherenkov_key).astype(bool)
             s = points[~is_cherenkov, index_map[self.amp_sum_key]]
             s_sum = float(np.sum(s))
         stats= [c_sum, s_sum, s_sum + c_sum]
@@ -787,7 +799,7 @@ class DualReadoutEventDataset(Dataset):
     def _dist_summary(self, C_amp, S_amp, points: np.ndarray, index_map: Mapping[str, int]) -> np.ndarray:
         """Compute physics-motivated summary features for one event."""
 
-        is_cherenkov = points[:, index_map[self.is_cherenkov_key]].astype(bool)
+        is_cherenkov = self._feature_column(points, index_map, self.is_cherenkov_key).astype(bool)
         c = points[is_cherenkov, index_map[self.amp_sum_key]]
         s = points[~is_cherenkov, index_map[self.amp_sum_key]]
         if(C_amp>0):

@@ -25,7 +25,7 @@ import h5py
 import matplotlib.pyplot as plt
 from matplotlib import transforms
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 from tqdm.auto import tqdm
 
 from utils.plot_helpers import (
@@ -37,7 +37,10 @@ from utils.plot_helpers import (
     pair_key,
     resolve_run_dir,
     safe_name,
+    set_publication_style,
 )
+
+set_publication_style()
 
 
 KIN_VARS = {
@@ -53,14 +56,48 @@ CONFIG_DIFF_EXCLUDE = {
     "log_batch_lengths",
     "log_cuda_memory",
 }
+FIXED_ENERGY_EDGES = np.asarray([1.0, 10.0, 30.0, 70.0, 120.0], dtype=np.float64)
+MIN_CONDITIONAL_EVENTS = 50
+DEFAULT_BOOTSTRAP_SAMPLES = 32
+DEFAULT_BOOTSTRAP_SEED = 12345
+DEFAULT_CONDITIONAL_ENERGY_CURVE_BINS = 16
+DEFAULT_CONDITIONAL_THETA_CURVE_BINS = 16
+EFFICIENCY_REFERENCE_LINES = {
+    "pi+ vs e-": [
+        (0.99, "tab:green", "99% eff"),
+        (0.90, "tab:purple", "90% eff"),
+    ],
+    "pi0 vs gamma": [
+        (0.90, "tab:green", "90% eff"),
+        (0.80, "tab:purple", "80% eff"),
+    ],
+}
+FIXED_TPR_TARGETS = {
+    "pi+ vs e-": [0.99, 0.90],
+    "pi0 vs gamma": [0.90, 0.80],
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot performance vs E_gen/theta/phi across runs.")
     parser.add_argument("--run-dirs", nargs="+", required=True, help="Run names or directories.")
+    parser.add_argument(
+        "--legend-labels",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional legend labels, in the same order as --run-dirs. "
+            "If provided, these override the auto-generated config labels."
+        ),
+    )
     parser.add_argument("--base-dir", default="save", help="Base dir when run names are provided.")
     parser.add_argument("--out-dir", default="plots", help="Output directory.")
-    parser.add_argument("--bins", type=int, default=100, help="Number of bins.")
+    parser.add_argument(
+        "--out-subdir",
+        default=None,
+        help="Optional subdirectory under --out-dir where plots will be written.",
+    )
+    parser.add_argument("--bins", type=int, default=20, help="Number of bins.")
     parser.add_argument(
         "--binning",
         choices=["quantile", "uniform"],
@@ -82,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--theta-binning",
         choices=["data", "tower"],
-        default="tower",
+        default="data",
         help="Use standard data-driven bins or tower-geometry theta bins.",
     )
     parser.add_argument(
@@ -116,6 +153,42 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional upper x-limit for theta plots. Defaults to the observed data range.",
+    )
+    parser.add_argument(
+        "--conditional-min-events",
+        type=int,
+        default=MIN_CONDITIONAL_EVENTS,
+        help="Minimum events required in a conditional bin before the metric is computed.",
+    )
+    parser.add_argument(
+        "--conditional-bootstrap-samples",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_SAMPLES,
+        help="Bootstrap resamples used to estimate conditional AUC error bars.",
+    )
+    parser.add_argument(
+        "--conditional-bootstrap-seed",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_SEED,
+        help="Random seed for conditional metric bootstrap resampling.",
+    )
+    parser.add_argument(
+        "--conditional-energy-curve-bins",
+        type=int,
+        default=DEFAULT_CONDITIONAL_ENERGY_CURVE_BINS,
+        help=(
+            "Number of finer energy bins used for the AUC-vs-energy curves inside each theta slice. "
+            "This is independent of the coarse 4-bin heatmap."
+        ),
+    )
+    parser.add_argument(
+        "--conditional-theta-curve-bins",
+        type=int,
+        default=DEFAULT_CONDITIONAL_THETA_CURVE_BINS,
+        help=(
+            "Number of finer theta bins used for the AUC-vs-theta curves inside each energy slice. "
+            "This is independent of the coarse 4-bin heatmap."
+        ),
     )
     return parser.parse_args()
 
@@ -415,6 +488,29 @@ def choose_edges(
     return make_bins(values, bins, mode)
 
 
+def _efficiency_reference_lines(pair_name: str) -> list[tuple[float, str, str]]:
+    return EFFICIENCY_REFERENCE_LINES.get(pair_name, [])
+
+
+def _add_efficiency_reference_lines(ax: plt.Axes, pair_name: str) -> list[float]:
+    levels: list[float] = []
+    for level, color, label in _efficiency_reference_lines(pair_name):
+        ax.axhline(level, color=color, linestyle="--", linewidth=1.4, alpha=0.95, label=label)
+        levels.append(float(level))
+    return levels
+
+
+def _expand_auc_ylim(ymin: float, ymax: float, reference_levels: Sequence[float]) -> tuple[float, float]:
+    lo = float(ymin)
+    hi = float(ymax)
+    if reference_levels:
+        ref_lo = min(reference_levels)
+        ref_hi = max(reference_levels)
+        lo = min(lo, max(0.0, ref_lo - 0.02))
+        hi = max(hi, min(1.0, ref_hi + 0.02))
+    return lo, hi
+
+
 def compute_bin_ids(x: np.ndarray, edges: np.ndarray) -> np.ndarray:
     if edges.size < 2:
         return np.full(x.shape, -1, dtype=np.int32)
@@ -505,6 +601,386 @@ def binned_pair_auc_from_bins(
     return centers.copy(), values, errors
 
 
+def _fpr_at_tpr(y_true: np.ndarray, scores: np.ndarray, target_tpr: float) -> float:
+    if y_true.size == 0 or scores.size == 0 or np.unique(y_true).size < 2:
+        return float("nan")
+    fpr, tpr, _ = roc_curve(y_true, scores)
+    if tpr.size == 0 or fpr.size == 0:
+        return float("nan")
+    if target_tpr <= float(np.min(tpr)):
+        return float(np.max(fpr))
+    if target_tpr >= float(np.max(tpr)):
+        return float(np.min(fpr))
+    return float(np.interp(target_tpr, tpr, fpr))
+
+
+def binned_pair_fpr_at_tpr_from_bins(
+    labels: np.ndarray,
+    probs: np.ndarray,
+    bin_ids: np.ndarray,
+    centers: np.ndarray,
+    class_to_label: Mapping[str, int],
+    pos: str,
+    neg: str,
+    *,
+    target_tpr: float,
+    extra_mask: np.ndarray | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n_bins = centers.size
+    if n_bins == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    values = np.full(n_bins, np.nan, dtype=np.float64)
+    if pos not in class_to_label or neg not in class_to_label:
+        return centers.copy(), values
+    pos_idx = int(class_to_label[pos])
+    neg_idx = int(class_to_label[neg])
+    score = probs[:, pos_idx]
+    mask = (bin_ids >= 0) & np.isin(labels, [pos_idx, neg_idx])
+    if extra_mask is not None:
+        mask = mask & extra_mask
+    if not np.any(mask):
+        return centers.copy(), values
+
+    for bin_idx in np.unique(bin_ids[mask]):
+        m = mask & (bin_ids == bin_idx)
+        if np.count_nonzero(m) < 2:
+            continue
+        y = (labels[m] == pos_idx).astype(np.int32)
+        if np.unique(y).size < 2:
+            continue
+        fpr_val = _fpr_at_tpr(y, score[m], target_tpr)
+        if not np.isfinite(fpr_val):
+            continue
+        values[int(bin_idx)] = max(float(fpr_val), 1e-6)
+    return centers.copy(), values
+
+
+def bootstrap_auc_std(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    *,
+    n_bootstrap: int,
+    seed: int,
+) -> float:
+    if n_bootstrap <= 0 or labels.size < 2 or scores.size < 2:
+        return float("nan")
+    if np.unique(labels).size < 2:
+        return float("nan")
+    rng = np.random.default_rng(seed)
+    stats: list[float] = []
+    for _ in range(n_bootstrap):
+        sample_idx = rng.integers(0, labels.size, size=labels.size)
+        y = labels[sample_idx]
+        if np.unique(y).size < 2:
+            continue
+        try:
+            stats.append(float(roc_auc_score(y, scores[sample_idx])))
+        except ValueError:
+            continue
+    if len(stats) < 2:
+        return float("nan")
+    return float(np.std(np.asarray(stats, dtype=np.float64), ddof=1))
+
+
+def _conditional_metric_grid(
+    labels: np.ndarray,
+    probs: np.ndarray,
+    energy: np.ndarray,
+    theta: np.ndarray,
+    class_to_label: Mapping[str, int],
+    *,
+    pos_label: str,
+    neg_label: str,
+    energy_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    min_events: int,
+    n_bootstrap: int,
+    bootstrap_seed: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_theta = theta_edges.size - 1
+    n_energy = energy_edges.size - 1
+    grid = np.full((n_theta, n_energy), np.nan, dtype=np.float64)
+    errors = np.full((n_theta, n_energy), np.nan, dtype=np.float64)
+    counts = np.zeros((n_theta, n_energy), dtype=np.int32)
+
+    if pos_label not in class_to_label or neg_label not in class_to_label:
+        return grid, errors, counts
+
+    pos_idx = int(class_to_label[pos_label])
+    neg_idx = int(class_to_label[neg_label])
+    valid = (
+        np.isfinite(energy)
+        & np.isfinite(theta)
+        & np.isin(labels, [pos_idx, neg_idx])
+    )
+    if not np.any(valid):
+        return grid, errors, counts
+
+    energy_ids = compute_bin_ids(energy, energy_edges)
+    theta_ids = compute_bin_ids(theta, theta_edges)
+    score = probs[:, pos_idx]
+
+    for tbin in range(n_theta):
+        for ebin in range(n_energy):
+            mask = valid & (theta_ids == tbin) & (energy_ids == ebin)
+            n_events = int(np.count_nonzero(mask))
+            counts[tbin, ebin] = n_events
+            if n_events < min_events:
+                continue
+            y = (labels[mask] == pos_idx).astype(np.int32)
+            if np.unique(y).size < 2:
+                continue
+            try:
+                auc = float(roc_auc_score(y, score[mask]))
+            except ValueError:
+                continue
+            grid[tbin, ebin] = auc
+            errors[tbin, ebin] = bootstrap_auc_std(
+                y,
+                score[mask],
+                n_bootstrap=n_bootstrap,
+                seed=bootstrap_seed + 1000 * tbin + ebin,
+            )
+    return grid, errors, counts
+
+
+def _format_bin_label(lo: float, hi: float) -> str:
+    return f"[{lo:g}, {hi:g})"
+
+
+def make_conditional_theta_edges(barrel_theta_min: float) -> np.ndarray:
+    edges = np.asarray([0.15, 0.3, barrel_theta_min, 0.9, 1.57], dtype=np.float64)
+    edges = np.unique(np.round(edges, decimals=10))
+    if edges.size < 5:
+        raise ValueError(
+            f"Conditional theta edges collapsed after deduplication: {edges.tolist()}"
+        )
+    return edges
+
+
+def _finite_value_limits(*arrays: np.ndarray, lower: float = 0.0, upper: float = 1.0) -> tuple[float, float]:
+    finite_parts: list[np.ndarray] = []
+    for arr in arrays:
+        if arr is None:
+            continue
+        flat = np.asarray(arr, dtype=np.float64).ravel()
+        flat = flat[np.isfinite(flat)]
+        if flat.size > 0:
+            finite_parts.append(flat)
+    if not finite_parts:
+        return lower, upper
+    values = np.concatenate(finite_parts)
+    lo = float(np.min(values))
+    hi = float(np.max(values))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return lower, upper
+    if lo == hi:
+        pad = max(0.005, abs(lo) * 0.01)
+    else:
+        pad = max(0.005, 0.03 * (hi - lo))
+    lo = max(lower, lo - pad)
+    hi = min(upper, hi + pad)
+    if hi <= lo:
+        lo = max(lower, lo - 0.01)
+        hi = min(upper, hi + 0.01)
+    return lo, hi
+
+
+def plot_conditional_auc_analysis(
+    *,
+    out_dir: Path,
+    run_payloads: Sequence[Mapping[str, object]],
+    labels_for_legend: Sequence[str],
+    pos_label: str,
+    neg_label: str,
+    barrel_theta_min: float,
+    min_events: int,
+    n_bootstrap: int,
+    bootstrap_seed: int,
+    energy_curve_bins: int,
+    theta_curve_bins: int,
+) -> Dict[str, object]:
+    energy_edges = FIXED_ENERGY_EDGES.copy()
+    theta_edges = make_conditional_theta_edges(barrel_theta_min)
+    energy_curve_edges = np.linspace(float(energy_edges[0]), float(energy_edges[-1]), int(energy_curve_bins) + 1)
+    theta_curve_edges = np.linspace(float(theta_edges[0]), float(theta_edges[-1]), int(theta_curve_bins) + 1)
+    energy_curve_centers = 0.5 * (energy_curve_edges[:-1] + energy_curve_edges[1:])
+    theta_curve_centers = 0.5 * (theta_curve_edges[:-1] + theta_curve_edges[1:])
+
+    pair_name = pair_key(pos_label, neg_label)
+    safe_pair = safe_name(pair_name)
+    run_grids: list[Dict[str, object]] = []
+    for run_idx, (label, payload) in enumerate(zip(labels_for_legend, run_payloads)):
+        coarse_grid, coarse_err, coarse_counts = _conditional_metric_grid(
+            payload["labels"],
+            payload["probs"],
+            payload["E_gen"],
+            payload["theta"],
+            payload["class_to_label"],
+            pos_label=pos_label,
+            neg_label=neg_label,
+            energy_edges=energy_edges,
+            theta_edges=theta_edges,
+            min_events=min_events,
+            n_bootstrap=n_bootstrap,
+            bootstrap_seed=bootstrap_seed + 17_389 * (run_idx + 1),
+        )
+        run_grids.append(
+            {
+                "label": label,
+                "grid": coarse_grid,
+                "err": coarse_err,
+                "counts": coarse_counts,
+            }
+        )
+
+    # AUC vs energy: one subplot per theta bin, with both runs overlaid.
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    axes_flat = axes.ravel()
+    energy_all_values: list[np.ndarray] = []
+    energy_all_errors: list[np.ndarray] = []
+    for tbin, ax in enumerate(axes_flat):
+        theta_lo = theta_edges[tbin]
+        theta_hi = theta_edges[tbin + 1]
+        ax.set_title(f"$\\theta$ {_format_bin_label(theta_lo, theta_hi)}", fontsize=14)
+        subplot_values: list[np.ndarray] = []
+        subplot_errors: list[np.ndarray] = []
+        for run_idx, run in enumerate(run_payloads):
+            grid, err, _ = _conditional_metric_grid(
+                run["labels"],
+                run["probs"],
+                run["E_gen"],
+                run["theta"],
+                run["class_to_label"],
+                pos_label=pos_label,
+                neg_label=neg_label,
+                energy_edges=energy_curve_edges,
+                theta_edges=np.asarray([theta_lo, theta_hi], dtype=np.float64),
+                min_events=min_events,
+                n_bootstrap=n_bootstrap,
+                bootstrap_seed=bootstrap_seed + 17 * (tbin + 1) + 50_003 * (run_idx + 1),
+            )
+            values = grid[0]
+            yerr = err[0]
+            subplot_values.append(values)
+            subplot_errors.append(yerr)
+            ax.errorbar(
+                energy_curve_centers,
+                values,
+                yerr=yerr,
+                fmt="-o",
+                linewidth=1.5,
+                markersize=4,
+                capsize=2.0,
+                label=labels_for_legend[run_idx],
+                )
+        energy_all_values.extend(subplot_values)
+        energy_all_errors.extend(subplot_errors)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.set_xlabel("Energy [GeV]")
+        ax.set_ylabel("AUC")
+        ax.tick_params(axis="both", labelsize=12)
+    axes_flat[0].legend(fontsize=11)
+    energy_ymin, energy_ymax = _finite_value_limits(
+        *(v - e for v, e in zip(energy_all_values, energy_all_errors)),
+        *(v + e for v, e in zip(energy_all_values, energy_all_errors)),
+        lower=0.0,
+        upper=1.0,
+    )
+    for ax in axes_flat:
+        ax.set_ylim(energy_ymin, energy_ymax)
+    fig.suptitle(f"{PAIR_LABELS.get(pair_name, pair_name)} AUC vs Energy by $\\theta$", fontsize=15)
+    fig.tight_layout()
+    auc_energy_path = out_dir / f"{safe_pair}_auc_vs_energy_by_theta.png"
+    fig.savefig(auc_energy_path, dpi=300)
+    plt.close(fig)
+    print(f"Wrote {auc_energy_path}")
+
+    # AUC vs theta: one subplot per energy bin, with both runs overlaid.
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    axes_flat = axes.ravel()
+    theta_all_values: list[np.ndarray] = []
+    theta_all_errors: list[np.ndarray] = []
+    for ebin, ax in enumerate(axes_flat):
+        energy_lo = energy_edges[ebin]
+        energy_hi = energy_edges[ebin + 1]
+        ax.set_title(f"Energy {_format_bin_label(energy_lo, energy_hi)} GeV", fontsize=14)
+        subplot_values = []
+        subplot_errors = []
+        for run_idx, run in enumerate(run_payloads):
+            grid, err, _ = _conditional_metric_grid(
+                run["labels"],
+                run["probs"],
+                run["E_gen"],
+                run["theta"],
+                run["class_to_label"],
+                pos_label=pos_label,
+                neg_label=neg_label,
+                energy_edges=np.asarray([energy_lo, energy_hi], dtype=np.float64),
+                theta_edges=theta_curve_edges,
+                min_events=min_events,
+                n_bootstrap=n_bootstrap,
+                bootstrap_seed=bootstrap_seed + 31 * (ebin + 1) + 50_003 * (run_idx + 1),
+            )
+            values = grid[:, 0]
+            yerr = err[:, 0]
+            subplot_values.append(values)
+            subplot_errors.append(yerr)
+            ax.errorbar(
+                theta_curve_centers,
+                values,
+                yerr=yerr,
+                fmt="-o",
+                linewidth=1.5,
+                markersize=4,
+                capsize=2.0,
+                label=labels_for_legend[run_idx],
+                )
+        theta_all_values.extend(subplot_values)
+        theta_all_errors.extend(subplot_errors)
+        ax.grid(True, linestyle="--", alpha=0.35)
+        ax.set_xlabel(r"$\theta$ [rad]")
+        ax.set_ylabel("AUC")
+        ax.tick_params(axis="both", labelsize=12)
+    axes_flat[0].legend(fontsize=11)
+    theta_ymin, theta_ymax = _finite_value_limits(
+        *(v - e for v, e in zip(theta_all_values, theta_all_errors)),
+        *(v + e for v, e in zip(theta_all_values, theta_all_errors)),
+        lower=0.0,
+        upper=1.0,
+    )
+    for ax in axes_flat:
+        ax.set_ylim(theta_ymin, theta_ymax)
+    fig.suptitle(f"{PAIR_LABELS.get(pair_name, pair_name)} AUC vs $\\theta$ by Energy", fontsize=15)
+    fig.tight_layout()
+    auc_theta_path = out_dir / f"{safe_pair}_auc_vs_theta_by_energy.png"
+    fig.savefig(auc_theta_path, dpi=300)
+    plt.close(fig)
+    print(f"Wrote {auc_theta_path}")
+
+    # Optional extension point:
+    # If you have a per-event timing observable (e.g. t50, t90-t10, timing RMS),
+    # compute the same fixed-bin grid here and mirror the heatmap / curve plots above.
+    # Keep the arrays aligned with `labels`, `E_gen`, and `theta` before calling this hook.
+
+    return {
+        "pair": pair_name,
+        "energy_edges": energy_edges.tolist(),
+        "theta_edges": theta_edges.tolist(),
+        "energy_curve_edges": energy_curve_edges.tolist(),
+        "theta_curve_edges": theta_curve_edges.tolist(),
+        "runs": [
+            {
+                "label": item["label"],
+                "grid": np.asarray(item["grid"], dtype=np.float64).tolist(),
+                "err": np.asarray(item["err"], dtype=np.float64).tolist(),
+                "counts": np.asarray(item["counts"], dtype=np.int64).tolist(),
+            }
+            for item in run_grids
+        ],
+    }
+
+
 def draw_theta_bin_width_guides(ax: plt.Axes, edges: np.ndarray) -> None:
     if edges.size < 2:
         return
@@ -578,6 +1054,8 @@ def draw_theta_region_labels(
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
+    if args.out_subdir:
+        out_dir = out_dir / args.out_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     base_dir = Path(args.base_dir)
 
@@ -637,9 +1115,17 @@ def main() -> None:
         print(f"Loaded {run_dir.name} in {time.perf_counter() - t0:.1f}s")
 
     diff_keys = differing_config_keys(cfgs, CONFIG_DIFF_EXCLUDE)
-    labels_for_legend = [
-        config_label(name, cfg, diff_keys, width=44) for name, cfg in zip(run_names, cfgs)
-    ]
+    if args.legend_labels:
+        if len(args.legend_labels) != len(run_names):
+            raise ValueError(
+                f"--legend-labels must match --run-dirs count "
+                f"({len(args.legend_labels)} != {len(run_names)})"
+            )
+        labels_for_legend = list(args.legend_labels)
+    else:
+        labels_for_legend = [
+            config_label(name, cfg, diff_keys, width=44) for name, cfg in zip(run_names, cfgs)
+        ]
 
     # Barrel/endcap split in theta (radians).
     theta_min = float(args.barrel_theta_min)
@@ -710,7 +1196,7 @@ def main() -> None:
             )
             if xc.size == 0:
                 continue
-            ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, label=label)
+            ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, alpha=0.75, label=label)
             if kin_name == "theta" and args.theta_binning == "tower":
                 draw_theta_empty_bin_markers(ax, xc, yc)
         ax.set_xlabel(kin_name)
@@ -729,10 +1215,10 @@ def main() -> None:
             draw_theta_region_labels(ax, theta_xlim, theta_min, theta_max)
             ax.set_xlim(*theta_xlim)
         ax.grid(True, linestyle="--", alpha=0.35)
-        ax.legend(fontsize=8, labelspacing=0.9)
+        ax.legend(fontsize=11, labelspacing=0.9)
         fig.tight_layout()
-        out_path = out_dir / f"perf_vs_{kin_name}_accuracy.png"
-        fig.savefig(out_path, dpi=150)
+        out_path = out_dir / f"accuracy_vs_{kin_name}.png"
+        fig.savefig(out_path, dpi=300)
         plt.close(fig)
         print(f"Wrote {out_path}")
 
@@ -757,7 +1243,7 @@ def main() -> None:
                 )
                 if xc.size == 0:
                     continue
-                line, = ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, label=label)
+                line, = ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, alpha=0.75, label=label)
                 finite = np.isfinite(yc) & np.isfinite(ye)
                 if np.any(finite):
                     ax.errorbar(
@@ -788,11 +1274,70 @@ def main() -> None:
                 draw_theta_region_labels(ax, theta_xlim, theta_min, theta_max)
                 ax.set_xlim(*theta_xlim)
             ax.grid(True, linestyle="--", alpha=0.35)
-            ax.legend(fontsize=8, labelspacing=0.9)
+            ax.legend(fontsize=11, labelspacing=0.9)
             fig.tight_layout()
             safe_pair = safe_name(key)
-            out_path = out_dir / f"perf_vs_{kin_name}_{safe_pair}.png"
-            fig.savefig(out_path, dpi=150)
+            out_path = out_dir / f"{safe_pair}_auc_vs_{kin_name}.png"
+            fig.savefig(out_path, dpi=300)
+            plt.close(fig)
+            print(f"Wrote {out_path}")
+
+    # Plot pairwise FPR at fixed TPR vs each variable.
+    tpr_jobs = [
+        (kin_name, pos, neg, target_tpr)
+        for kin_name in ("E_gen", "theta", "phi")
+        for pos, neg in PAIR_SPECS
+        for target_tpr in FIXED_TPR_TARGETS.get(pair_key(pos, neg), [])
+    ]
+    for kin_name, pos, neg, target_tpr in tqdm(tpr_jobs, desc="Operating point plots", unit="plot"):
+            key = pair_key(pos, neg)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            all_values: list[np.ndarray] = []
+            for label, payload in zip(labels_for_legend, run_payloads):
+                cached = payload["bin_cache"][kin_name]
+                edges = cached["edges"]
+                if edges.size < 2:
+                    continue
+                xc, yc = binned_pair_fpr_at_tpr_from_bins(
+                    payload["labels"],
+                    payload["probs"],
+                    cached["bin_ids"],
+                    cached["centers"],
+                    payload["class_to_label"],
+                    pos,
+                    neg,
+                    target_tpr=target_tpr,
+                )
+                if xc.size == 0:
+                    continue
+                all_values.append(yc)
+                ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, alpha=0.75, label=label)
+                if kin_name == "theta" and args.theta_binning == "tower":
+                    draw_theta_empty_bin_markers(ax, xc, yc)
+            ax.set_xlabel(kin_name)
+            ax.set_ylabel(f"FPR @ TPR={target_tpr:.0%}")
+            ax.set_yscale("log")
+            ax.set_title(f"{PAIR_LABELS.get(key, key)} operating point vs {kin_name}")
+            if kin_name == "theta" and theta_xlim is not None:
+                theta_center = math.pi / 2.0
+                if theta_xlim[0] <= theta_min <= theta_xlim[1]:
+                    ax.axvline(theta_min, color="gray", linestyle=":", linewidth=1.2, alpha=0.9)
+                if theta_xlim[0] <= theta_center <= theta_xlim[1]:
+                    ax.axvline(theta_center, color="gray", linestyle=":", linewidth=1.2, alpha=0.9)
+                if theta_xlim[0] <= theta_max <= theta_xlim[1]:
+                    ax.axvline(theta_max, color="gray", linestyle=":", linewidth=1.2, alpha=0.9)
+                if args.theta_binning == "tower":
+                    draw_theta_bin_width_guides(ax, edges)
+                draw_theta_region_labels(ax, theta_xlim, theta_min, theta_max)
+                ax.set_xlim(*theta_xlim)
+            y_min, y_max = _finite_value_limits(*all_values, lower=1e-6, upper=1.0)
+            ax.set_ylim(y_min, y_max)
+            ax.grid(True, linestyle="--", alpha=0.35)
+            ax.legend(fontsize=11, labelspacing=0.9)
+            fig.tight_layout()
+            safe_pair = safe_name(key)
+            out_path = out_dir / f"{safe_pair}_fpr_at_tpr{int(round(target_tpr * 100)):02d}_vs_{kin_name}.png"
+            fig.savefig(out_path, dpi=300)
             plt.close(fig)
             print(f"Wrote {out_path}")
 
@@ -832,7 +1377,7 @@ def main() -> None:
             )
             if xc.size == 0:
                 continue
-            line, = ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, label=label)
+            line, = ax.plot(xc, yc, marker="o", linewidth=1.5, markersize=4.5, alpha=0.75, label=label)
             finite = np.isfinite(yc) & np.isfinite(ye)
             if np.any(finite):
                 ax.errorbar(
@@ -843,19 +1388,38 @@ def main() -> None:
                     ecolor=line.get_color(),
                     elinewidth=0.85,
                     capsize=1.8,
-                    alpha=0.8,
-                )
+                alpha=0.8,
+            )
         ax.set_xlabel("E_gen")
         ax.set_title(region_title)
         ax.grid(True, linestyle="--", alpha=0.35)
     axes[0].set_ylabel("ROC-AUC")
-    axes[0].legend(fontsize=8, labelspacing=0.9)
+    axes[0].legend(fontsize=11, labelspacing=0.9)
     fig.suptitle(f"{PAIR_LABELS['pi0 vs gamma']} AUC vs E_gen by region")
     fig.tight_layout()
-    out_region = out_dir / "perf_vs_E_gen_pi0_vs_gamma_barrel_endcap.png"
-    fig.savefig(out_region, dpi=150)
+    out_region = out_dir / "pi0_vs_gamma_auc_vs_E_gen_barrel_endcap.png"
+    fig.savefig(out_region, dpi=300)
     plt.close(fig)
     print(f"Wrote {out_region}")
+
+    conditional_summary = None
+    if len(run_payloads) >= 2:
+        conditional_summary = [
+            plot_conditional_auc_analysis(
+                out_dir=out_dir,
+                run_payloads=run_payloads,
+                labels_for_legend=labels_for_legend,
+                pos_label=pos_label,
+                neg_label=neg_label,
+                barrel_theta_min=theta_min,
+                min_events=int(args.conditional_min_events),
+                n_bootstrap=int(args.conditional_bootstrap_samples),
+                bootstrap_seed=int(args.conditional_bootstrap_seed) + 50_000 * offset,
+                energy_curve_bins=int(args.conditional_energy_curve_bins),
+                theta_curve_bins=int(args.conditional_theta_curve_bins),
+            )
+            for offset, (pos_label, neg_label) in enumerate((("pi0", "gamma"), ("pi+", "e-")))
+        ]
 
     # Save summary metadata.
     summary = {
@@ -874,6 +1438,7 @@ def main() -> None:
         ),
         "tower_geometry_xml": args.tower_geometry_xml if args.theta_binning == "tower" else None,
         "theta_plot_max": args.theta_plot_max,
+        "conditional_analysis": conditional_summary,
     }
     out_json = out_dir / "perf_by_kinematics_summary.json"
     out_json.write_text(json.dumps(summary, indent=2))

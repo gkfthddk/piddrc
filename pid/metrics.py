@@ -36,6 +36,52 @@ def roc_auc(logits: torch.Tensor, labels: torch.Tensor) -> Optional[float]:
         return None
 
 
+def pairwise_roc_auc(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    class_a: int,
+    class_b: int,
+) -> Optional[float]:
+    if roc_auc_score is None:
+        return None
+    mask = (labels == class_a) | (labels == class_b)
+    if int(mask.sum().item()) < 2:
+        return None
+    subset_logits = logits[mask][:, [class_a, class_b]]
+    subset_labels = (labels[mask] == class_b).to(torch.long)
+    labels_np = subset_labels.cpu().numpy()
+    if np.unique(labels_np).size < 2:
+        return None
+    probs = torch.softmax(subset_logits, dim=1)[:, 1].cpu().numpy()
+    try:
+        return float(roc_auc_score(labels_np, probs))
+    except ValueError:
+        return None
+
+
+def class_recall(logits: torch.Tensor, labels: torch.Tensor, class_index: int) -> Optional[float]:
+    mask = labels == class_index
+    positives = int(mask.sum().item())
+    if positives == 0:
+        return None
+    preds = logits.argmax(dim=1)
+    return float((preds[mask] == class_index).float().mean().item())
+
+
+def macro_recall(logits: torch.Tensor, labels: torch.Tensor) -> Optional[float]:
+    num_classes = logits.shape[1]
+    if num_classes <= 0:
+        return None
+    recalls = []
+    for class_index in range(num_classes):
+        recall = class_recall(logits, labels, class_index)
+        if recall is not None:
+            recalls.append(recall)
+    if not recalls:
+        return None
+    return float(np.mean(np.asarray(recalls, dtype=np.float64)))
+
+
 def energy_resolution(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
     pred_np = pred.detach().cpu().to(torch.float32).numpy()
     target_np = target.detach().cpu().to(torch.float32).numpy()
@@ -57,4 +103,13 @@ def energy_linearity(pred: torch.Tensor, target: torch.Tensor) -> Tuple[float, f
     return float(slope), float(intercept)
 
 
-__all__ = ["accuracy", "mse", "roc_auc", "energy_resolution", "energy_linearity"]
+__all__ = [
+    "accuracy",
+    "mse",
+    "roc_auc",
+    "pairwise_roc_auc",
+    "class_recall",
+    "macro_recall",
+    "energy_resolution",
+    "energy_linearity",
+]
