@@ -1,0 +1,29 @@
+# Skill: Inspect New Dataset
+
+This skill provides a standard procedure for inspecting a newly added HDF5 dataset to ensure it matches the expected schema and has reasonable feature distributions.
+
+## Execution Steps
+
+1. **Schema Verification**
+   - Use the inspection script to view all keys and shapes:
+     ```bash
+     python inspect_h5.py h5s/your_file.h5py
+     ```
+
+2. **Feature Statistics**
+   - Generate a statistics YAML to check for NaNs or extreme values:
+     ```bash
+     ./run_env.sh python compute_stats.py --data_dir h5s --files your_file --output debug_stats.yaml
+     ```
+
+3. **Visual Sanity Check**
+   - Generate basic shower property plots for a small event sample:
+     ```bash
+     ./run_env.sh python plot_shower_properties.py --files h5s/your_file.h5py --max-events 500
+     ```
+
+4. **Point Order Check**
+   - Verify that points are ordered correctly (e.g. by time or depth if required by specific models):
+     ```bash
+     ./run_env.sh python check_point_order.py --files h5s/your_file.h5py
+     ```

@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 res*.sh
+main.tex
+main.pdf
+sample.bib
 toh5_legacy.py
 h5s
 h5
@@ -8,3 +11,14 @@ save
 condor
 plots
 analysis
+
+# LaTeX build files
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz

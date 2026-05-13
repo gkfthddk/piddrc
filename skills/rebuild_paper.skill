@@ -1,0 +1,46 @@
+# Skill: Rebuild Paper Figures
+
+This skill regenerates all figures required for the JINST-oriented paper as defined in the `PLOTTING_MANIFEST.md` and recompiles the manuscript.
+
+## Prerequisites
+- Data files in `h5s/` must be present.
+- Mamba environment `torch251` must be installed.
+
+## Execution Steps
+
+1. **Environment Setup**
+   - Commands should be run using `./run_env.sh` to ensure the correct environment.
+
+2. **Generate Main Paper Figures**
+   - Run Timing Validation:
+     ```bash
+     ./run_env.sh python plot_timing_reconstruction_validation.py --summary-json
+     ```
+   - Run Depth-Timing Correlation:
+     ```bash
+     ./run_env.sh python plot_depth_vs_q50.py --summary-json
+     ```
+   - Run Shower Depth Distribution:
+     ```bash
+     ./run_env.sh python plot_shower_depth_distribution.py
+     ```
+   - Run Kinematic Performance:
+     ```bash
+     ./run_env.sh python plot_performance_by_kinematics.py
+     ```
+
+3. **Generate Supporting Figures** (Optional but recommended)
+   - Run Longitudinal Summary:
+     ```bash
+     ./run_env.sh python plot_longitudinal_observables_summary.py
+     ```
+
+4. **Recompile Manuscript**
+   - Run the compilation script:
+     ```bash
+     ./compile.sh
+     ```
+
+5. **Validation**
+   - Verify that `main.pdf` has been updated.
+   - Check `plots/` directory for updated PNG/PDF files.
