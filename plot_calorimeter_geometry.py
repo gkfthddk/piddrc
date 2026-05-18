@@ -109,7 +109,11 @@ def main():
     ax.axhline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.4, zorder=2)
     ax.axvline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.4, zorder=2)
     
+    # Explicitly set limits to frame the full circular calorimeter ring (radii 1800 to 3800 mm)
+    ax.set_xlim(-4200, 4200)
+    ax.set_ylim(-4200, 4200)
     ax.set_aspect('equal')
+    
     ax.set_title("Calorimeter Barrel Transverse Cross-Section (X-Y Plane at Z=0)\n283 Projective Towers Map", fontsize=13, fontweight='bold', pad=15)
     ax.set_xlabel("X coordinate [mm]", fontsize=10)
     ax.set_ylabel("Y coordinate [mm]", fontsize=10)
@@ -199,14 +203,13 @@ def main():
         zb = r_max * np.cos(edge)
         xb = r_max * np.sin(edge)
         
-        # Determine styling: barrel_theta_min is the physical boundary (prominent gold dash-dot),
-        # pi/2 is the midplane, others are kinematic bins (dashed orange)
+        # Determine styling: all kinematic and barrel-endcap bounds are unified as dashed orange lines
         is_bt = abs(edge - 0.613626) < 1e-4
         is_pi2 = abs(edge - 1.5708) < 1e-3
         
-        color = '#f1c40f' if is_bt else '#e67e22'
-        ls = '-.' if is_bt else '--'
-        lw = 1.8 if is_bt else 1.2
+        color = '#e67e22'
+        ls = '--'
+        lw = 1.3
         
         # Plot ray in the first quadrant
         ax.plot([0, zb], [0, xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
@@ -249,8 +252,7 @@ def main():
     legend_elements_long = [
         Line2D([0], [0], color='#2ecc71', linewidth=2.5, label='Barrel Region (52 slices)'),
         Line2D([0], [0], color='#e74c3c', linewidth=2.5, label='Endcap Region (40 slices)'),
-        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.8, label='Barrel-Endcap Bound (θ ≈ 0.61 rad)'),
-        Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.2, label='Kinematic Bin Bounds (0.15, 0.30, 0.90 rad)')
+        Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.3, label='Kinematic Bin Boundaries')
     ]
     ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9.5)
     
