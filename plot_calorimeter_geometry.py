@@ -208,7 +208,7 @@ def main():
             r_label = 5250.0
         elif abs(edge - 0.9) < 1e-4:
             r_max = 5000.0
-            r_label = 4950.0
+            r_label = 4300.0  # Pulled down and left along the ray to completely clear the legend box
         elif is_pi2:
             r_max = 3900.0
             r_label = 3850.0
@@ -251,8 +251,8 @@ def main():
         # Elegant white bbox to prevent overlapping with grid lines or tower blocks
         bbox_style = dict(facecolor='white', edgecolor='none', alpha=0.85, boxstyle='round,pad=0.2')
             
-        # Draw text label in the first quadrant (increased font size + bbox)
-        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=11.0, 
+        # Draw text label in the first quadrant (increased font size + bbox, bold fontweight removed)
+        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontsize=11.0, 
                 ha=ha_pos, va=va_pos, bbox=bbox_style, zorder=6)
             
     # Grid and crosshairs
