@@ -10,7 +10,7 @@ h5
 save
 condor
 plots
-analysis
+analysis/*/
 
 # LaTeX build files
 *.aux
