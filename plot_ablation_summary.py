@@ -14,7 +14,7 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils.plot_helpers import set_publication_style, softmax, infer_class_to_label
+from utils.plot_helpers import set_publication_style, softmax, infer_class_to_label, pairwise_score
 
 set_publication_style()
 
@@ -43,7 +43,7 @@ def compute_pair_auc(labels, probs, c2l, pos, neg):
     neg_idx = c2l[neg]
     mask = np.isin(labels, [pos_idx, neg_idx])
     y_true = (labels[mask] == pos_idx).astype(int)
-    y_score = probs[mask, pos_idx]
+    y_score = pairwise_score(probs, c2l, pos, neg)[mask]
     if len(np.unique(y_true)) < 2:
         return float("nan")
     return roc_auc_score(y_true, y_score)
@@ -63,8 +63,25 @@ def main():
         c2l = infer_class_to_label(records, source_files)
         labels = np.array([int(r["label"]) for r in records])
         probs = np.array([softmax(r["logits"]) for r in records])
-        preds = np.argmax(probs, axis=1)
-        accuracy = np.mean(preds == labels)
+        
+        # Apply EM grouping for overall accuracy
+        em_indices = [int(c2l[c]) for c in ["gamma", "e-"] if c in c2l]
+        if em_indices:
+            rep_idx = em_indices[0]
+            grouped_probs = probs.copy()
+            em_sum = np.sum(probs[:, em_indices], axis=1)
+            grouped_probs[:, rep_idx] = em_sum
+            for idx in em_indices[1:]:
+                grouped_probs[:, idx] = -1.0
+            preds = np.argmax(grouped_probs, axis=1)
+            
+            grouped_labels = labels.copy()
+            for idx in em_indices:
+                grouped_labels[grouped_labels == idx] = rep_idx
+            accuracy = np.mean(preds == grouped_labels)
+        else:
+            preds = np.argmax(probs, axis=1)
+            accuracy = np.mean(preds == labels)
 
         pair_aucs = {}
         for pos, neg, pair_title in PAIRS:

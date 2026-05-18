@@ -29,12 +29,14 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from tqdm.auto import tqdm
 
 from utils.plot_helpers import (
+    EM_GROUP_CLASSES,
     PAIR_LABELS,
     PAIR_SPECS,
     config_label,
     differing_config_keys,
     infer_class_to_label,
     pair_key,
+    pairwise_score,
     resolve_run_dir,
     safe_name,
     set_publication_style,
@@ -75,6 +77,7 @@ EFFICIENCY_REFERENCE_LINES = {
 FIXED_TPR_TARGETS = {
     "pi+ vs e-": [0.99, 0.90],
     "pi0 vs gamma": [0.90, 0.80],
+    "e- vs gamma": [0.90, 0.80],
 }
 
 
@@ -579,21 +582,36 @@ def binned_pair_auc_from_bins(
         return centers.copy(), values, errors
     pos_idx = int(class_to_label[pos])
     neg_idx = int(class_to_label[neg])
-    score = probs[:, pos_idx]
-    mask = (bin_ids >= 0) & np.isin(labels, [pos_idx, neg_idx])
+    
+    # Determine all indices to include in the comparison (EM grouping)
+    include_indices = [pos_idx, neg_idx]
+    pos_group = [pos_idx]
+    if pos in EM_GROUP_CLASSES and neg not in EM_GROUP_CLASSES:
+        pos_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set(pos_group + [neg_idx]))
+    elif neg in EM_GROUP_CLASSES and pos not in EM_GROUP_CLASSES:
+        neg_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set([pos_idx] + neg_group))
+
+    score = pairwise_score(probs, class_to_label, pos, neg)
+    mask = (bin_ids >= 0) & np.isin(labels, include_indices)
     if extra_mask is not None:
         mask = mask & extra_mask
     if not np.any(mask):
+        print(f"DEBUG: No events found for {pos}({pos_idx}) vs {neg}({neg_idx}) (indices {include_indices})")
         return centers.copy(), values, errors
 
     for bin_idx in np.unique(bin_ids[mask]):
         m = mask & (bin_ids == bin_idx)
         if np.count_nonzero(m) < 2:
             continue
-        y = (labels[m] == pos_idx).astype(np.int32)
+        # Use grouped label for y
+        y = np.isin(labels[m], pos_group).astype(np.int32)
         n_pos = int(np.count_nonzero(y == 1))
         n_neg = int(np.count_nonzero(y == 0))
         if n_pos == 0 or n_neg == 0:
+            if bin_idx == np.unique(bin_ids[mask])[0]: # Only print for the first bin to avoid spam
+                print(f"DEBUG: Bin {bin_idx} for {pos}({pos_idx}) vs {neg}({neg_idx}) has n_pos={n_pos}, n_neg={n_neg}")
             continue
         auc = float(roc_auc_score(y, score[m]))
         values[int(bin_idx)] = auc
@@ -634,8 +652,19 @@ def binned_pair_fpr_at_tpr_from_bins(
         return centers.copy(), values
     pos_idx = int(class_to_label[pos])
     neg_idx = int(class_to_label[neg])
-    score = probs[:, pos_idx]
-    mask = (bin_ids >= 0) & np.isin(labels, [pos_idx, neg_idx])
+
+    # Determine all indices to include in the comparison (EM grouping)
+    include_indices = [pos_idx, neg_idx]
+    pos_group = [pos_idx]
+    if pos in EM_GROUP_CLASSES and neg not in EM_GROUP_CLASSES:
+        pos_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set(pos_group + [neg_idx]))
+    elif neg in EM_GROUP_CLASSES and pos not in EM_GROUP_CLASSES:
+        neg_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set([pos_idx] + neg_group))
+
+    score = pairwise_score(probs, class_to_label, pos, neg)
+    mask = (bin_ids >= 0) & np.isin(labels, include_indices)
     if extra_mask is not None:
         mask = mask & extra_mask
     if not np.any(mask):
@@ -645,7 +674,7 @@ def binned_pair_fpr_at_tpr_from_bins(
         m = mask & (bin_ids == bin_idx)
         if np.count_nonzero(m) < 2:
             continue
-        y = (labels[m] == pos_idx).astype(np.int32)
+        y = np.isin(labels[m], pos_group).astype(np.int32)
         if np.unique(y).size < 2:
             continue
         fpr_val = _fpr_at_tpr(y, score[m], target_tpr)
@@ -708,17 +737,28 @@ def _conditional_metric_grid(
 
     pos_idx = int(class_to_label[pos_label])
     neg_idx = int(class_to_label[neg_label])
+    
+    # Determine all indices to include (EM grouping)
+    include_indices = [pos_idx, neg_idx]
+    pos_group = [pos_idx]
+    if pos_label in EM_GROUP_CLASSES and neg_label not in EM_GROUP_CLASSES:
+        pos_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set(pos_group + [neg_idx]))
+    elif neg_label in EM_GROUP_CLASSES and pos_label not in EM_GROUP_CLASSES:
+        neg_group = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        include_indices = list(set([pos_idx] + neg_group))
+
     valid = (
         np.isfinite(energy)
         & np.isfinite(theta)
-        & np.isin(labels, [pos_idx, neg_idx])
+        & np.isin(labels, include_indices)
     )
     if not np.any(valid):
         return grid, errors, counts
 
     energy_ids = compute_bin_ids(energy, energy_edges)
     theta_ids = compute_bin_ids(theta, theta_edges)
-    score = probs[:, pos_idx]
+    score = pairwise_score(probs, class_to_label, pos_label, neg_label)
 
     for tbin in range(n_theta):
         for ebin in range(n_energy):
@@ -727,7 +767,7 @@ def _conditional_metric_grid(
             counts[tbin, ebin] = n_events
             if n_events < min_events:
                 continue
-            y = (labels[mask] == pos_idx).astype(np.int32)
+            y = np.isin(labels[mask], pos_group).astype(np.int32)
             if np.unique(y).size < 2:
                 continue
             try:
@@ -1098,13 +1138,42 @@ def main() -> None:
         theta = kin_values["theta"]
         phi = kin_values["phi"]
 
+        # Apply EM grouping for predictions and accuracy calculations
+        em_indices = [int(class_to_label[c]) for c in ["gamma", "e-"] if c in class_to_label]
+        
+        grouped_labels = labels.copy()
+        preds = np.argmax(probs, axis=1) # Default
+        
+        # Create grouped probs for argmax
+        if em_indices:
+            # We treat the first em_index as the representative for the group
+            rep_idx = em_indices[0]
+            grouped_probs = probs.copy()
+            # Sum EM probabilities into the representative column
+            em_sum = np.sum(probs[:, em_indices], axis=1)
+            grouped_probs[:, rep_idx] = em_sum
+            # Zero out other EM columns to avoid double counting in argmax
+            for idx in em_indices[1:]:
+                grouped_probs[:, idx] = -1.0
+            
+            # Recompute predictions
+            preds = np.argmax(grouped_probs, axis=1)
+            
+            # Map truth labels: map all EM labels to the representative index
+            for idx in em_indices[1:]:
+                grouped_labels[grouped_labels == idx] = rep_idx
+
+        # Compute accuracy using the grouped labels
+        accuracy = np.mean(preds == grouped_labels)
+        print(f"  Grouped Accuracy: {accuracy*100:.2f}%")
+
         run_names.append(run_dir.name)
         cfgs.append(cfg)
         run_payloads.append(
             {
-                "labels": labels,
+                "labels": labels,         # AUC and FPR must use original labels
                 "logits": logits,
-                "preds": np.argmax(logits, axis=1),
+                "preds": preds,           # Grouped predictions (if needed elsewhere)
                 "probs": probs,
                 "class_to_label": class_to_label,
                 "E_gen": e_gen,

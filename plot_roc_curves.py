@@ -15,7 +15,7 @@ import numpy as np
 from sklearn.metrics import roc_curve, auc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils.plot_helpers import set_publication_style, softmax, infer_class_to_label
+from utils.plot_helpers import set_publication_style, softmax, infer_class_to_label, pairwise_score
 
 set_publication_style()
 
@@ -70,7 +70,7 @@ def main():
 
             mask = np.isin(labels, [pos_idx, neg_idx])
             y_true = (labels[mask] == pos_idx).astype(int)
-            y_score = probs[mask, pos_idx]
+            y_score = pairwise_score(probs, c2l, pos, neg)[mask]
 
             fpr, tpr, _ = roc_curve(y_true, y_score)
             roc_auc = auc(fpr, tpr)

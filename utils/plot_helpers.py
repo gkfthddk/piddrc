@@ -11,11 +11,60 @@ import matplotlib as mpl
 import numpy as np
 
 
-PAIR_SPECS: List[Tuple[str, str]] = [("pi0", "gamma"), ("pi+", "e-")]
+PAIR_SPECS: List[Tuple[str, str]] = [("pi0", "gamma"), ("pi+", "e-"), ("e-", "gamma")]
 PAIR_LABELS = {
     "pi0 vs gamma": r"$\pi^{0}$ vs $\gamma$",
     "pi+ vs e-": r"$\pi^{+}$ vs $e^{-}$",
+    "e- vs gamma": r"$e^{-}$ vs $\gamma$",
 }
+
+# Classes that share single-EM shower topology and should be grouped
+# when computing pairwise discrimination scores against π⁰.
+EM_GROUP_CLASSES: Tuple[str, ...] = ("gamma", "e-")
+
+
+def pairwise_score(
+    probs: np.ndarray,
+    class_to_label: Mapping[str, int],
+    pos: str,
+    neg: str,
+) -> np.ndarray:
+    """Compute a pairwise discrimination score for ROC analysis.
+
+    For π⁰ vs γ (or any pair where one side overlaps with another class
+    in the EM group), the score is the conditional probability of the
+    positive class given the relevant class pool:
+
+        score = P(pos) / (P(pos) + Σ P(neg_group))
+
+    where neg_group = EM_GROUP_CLASSES when neg ∈ EM_GROUP_CLASSES,
+    otherwise neg_group = {neg}.  This prevents the γ/e⁻ confusion
+    from leaking into the π⁰ vs γ ROC.
+
+    For pairs where neither side is in the EM group (or when the pair
+    is purely EM, e.g. γ vs e⁻), the raw softmax P(pos) is returned.
+    """
+    pos_idx = int(class_to_label[pos])
+    neg_idx = int(class_to_label[neg])
+
+    # Case 1: Grouped background (e.g. pi0 vs gamma where gamma group includes e-)
+    if neg in EM_GROUP_CLASSES and pos not in EM_GROUP_CLASSES:
+        neg_indices = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        score_pos = probs[:, pos_idx]
+        score_neg = np.sum(probs[:, neg_indices], axis=1)
+    # Case 2: Grouped signal (e.g. gamma vs pi0 where gamma group includes e-)
+    elif pos in EM_GROUP_CLASSES and neg not in EM_GROUP_CLASSES:
+        pos_indices = [int(class_to_label[c]) for c in EM_GROUP_CLASSES if c in class_to_label]
+        score_pos = np.sum(probs[:, pos_indices], axis=1)
+        score_neg = probs[:, neg_idx]
+    # Case 3: Pure pairwise (no grouping, e.g. e- vs gamma, or pi+ vs e-)
+    else:
+        score_pos = probs[:, pos_idx]
+        score_neg = probs[:, neg_idx]
+
+    denom = score_pos + score_neg
+    denom = np.where(denom > 0, denom, 1.0)  # avoid division by zero
+    return score_pos / denom
 DEFAULT_CONFIG_DIFF_EXCLUDE: Set[str] = {
     "checkpoint",
     "history_json",

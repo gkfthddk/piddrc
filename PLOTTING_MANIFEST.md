@@ -40,6 +40,9 @@ These scripts can be useful in the paper or appendix but should not define the m
 - `plot_point_cloud_overview.py`
   Visualizes the hit-level point cloud distribution for an event. Essential for qualitative verification of shower structure and detector hit patterns.
 
+- `plot_sim3d_event_display.py`
+  Generates 3D event displays for truth-level Sim3dCalorimeterHits, colored by energy. Perfect for visualizing the difference between gamma and pi0 showers.
+
 
 ## Diagnostic / Legacy
 
