@@ -202,16 +202,16 @@ def main():
         is_bt = abs(edge - 0.613626) < 1e-4
         is_pi2 = abs(edge - 1.5708) < 1e-3
         
-        # Dynamically set ray length and text placement radius to stay outside the calorimeter
+        # Dynamically set ray length and text placement radius to stay outside the calorimeter and within new Z<5000, X<4000 limits
         if is_bt:
             r_max = 5300.0
             r_label = 5250.0
         elif abs(edge - 0.9) < 1e-4:
-            r_max = 5200.0
-            r_label = 5150.0
+            r_max = 5000.0
+            r_label = 4950.0
         elif is_pi2:
-            r_max = 4900.0
-            r_label = 4850.0
+            r_max = 3900.0
+            r_label = 3850.0
         else:
             r_max = 4900.0
             r_label = 4800.0
@@ -260,9 +260,9 @@ def main():
     ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
     ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
     
-    # Zoom into the first quadrant, setting axes up to 5000 mm (with 200mm margin for label clearance)
-    ax.set_xlim(-100, 5200)
-    ax.set_ylim(-100, 5200)
+    # Zoom into the first quadrant, setting Z up to 5000 mm and X up to 4000 mm (with 100mm margin)
+    ax.set_xlim(-100, 5100)
+    ax.set_ylim(-100, 4100)
     ax.set_aspect('equal')
     ax.tick_params(axis='both', which='major', labelsize=11.5)
     
