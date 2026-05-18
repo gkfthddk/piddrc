@@ -106,44 +106,37 @@ def main():
     plt.close()
     
     # -----------------------------------------------------------------
-    # 2. Generate Longitudinal Cross-Section (Z-X Plane)
+    # 2. Generate Longitudinal Cross-Section (Z-X Plane, First Quadrant)
     # -----------------------------------------------------------------
-    print("Generating Longitudinal Cross-Section (Z-X Plane)...")
-    fig, ax = plt.subplots(figsize=(11, 6.5))
+    print("Generating Longitudinal Cross-Section (Z-X Plane, First Quadrant)...")
+    fig, ax = plt.subplots(figsize=(9, 8))
     
     # We choose phi slice 0 to show the full profile along Z
     phi_idx = 0
     
-    # Full theta rings: -92 to 91 (reflecting negative Z side)
-    theta_indices = list(range(-n_theta, 0)) + list(range(0, n_theta))
+    # First Quadrant: positive Z side (theta indices 0 to 91)
+    theta_indices = list(range(0, n_theta))
     
     for theta_idx in theta_indices:
-        is_neg = theta_idx < 0
-        actual_theta = abs(theta_idx) - 1 if is_neg else theta_idx
-        
         # Inner face center (head)
-        ix, iy, iz = geo.head[phi_idx][actual_theta]
-        if is_neg: iz = -iz
+        ix, iy, iz = geo.head[phi_idx][theta_idx]
         
         # Outer face center (tail)
-        ox, oy, oz = geo.sipmlayer[phi_idx][actual_theta]
-        if is_neg: oz = -oz
+        ox, oy, oz = geo.sipmlayer[phi_idx][theta_idx]
         
         # Color-code: barrel is first 52 slices, endcap is last 40 slices
-        is_barrel = actual_theta < 52
+        is_barrel = theta_idx < 52
         color = '#2ecc71' if is_barrel else '#e74c3c'
         alpha = 0.85 if is_barrel else 0.75
         
-        # Draw the line representing the longitudinal profile of each projective tower (Z-X plane)
-        ax.plot([iz, oz], [ix, ox], color=color, linewidth=1.4, alpha=alpha)
-        # Mirror along the beamline to show the full circular/cylindrical profile
-        ax.plot([iz, oz], [-ix, -ox], color=color, linewidth=1.4, alpha=alpha)
+        # Draw the line representing the longitudinal profile of each projective tower (Z-X plane, First Quadrant)
+        ax.plot([iz, oz], [ix, ox], color=color, linewidth=1.6, alpha=alpha)
         
     # Draw Barrel-Endcap and Kinematic performance division boundary lines
     # Theta edges: 0.15, 0.3, barrel_theta_min (0.613626), 0.9, 1.5708
     theta_edges = [0.15, 0.3, 0.613626, 0.9, 1.5708]
     r_max = 5200.0
-    r_label = 5450.0
+    r_label = 5400.0
     
     for edge in theta_edges:
         zb = r_max * np.cos(edge)
@@ -156,17 +149,10 @@ def main():
         
         color = '#f1c40f' if is_bt else '#e67e22'
         ls = '-.' if is_bt else '--'
-        lw = 1.6 if is_bt else 1.0
+        lw = 1.8 if is_bt else 1.2
         
-        # Plot rays (Positive X side)
+        # Plot ray in the first quadrant
         ax.plot([0, zb], [0, xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
-        if not is_pi2:
-            ax.plot([0, -zb], [0, xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
-            
-        # Plot rays (Negative X side / mirrored)
-        ax.plot([0, zb], [0, -xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
-        if not is_pi2:
-            ax.plot([0, -zb], [0, -xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
             
         # Text labels positioning and formatting
         z_lbl = r_label * np.cos(edge)
@@ -182,32 +168,34 @@ def main():
         ha_pos = 'center'
         va_pos = 'bottom'
         if edge < 0.2:
-            ha_pos = 'left' if z_lbl > 0 else 'right'
+            ha_pos = 'left'
             va_pos = 'center'
             
-        # Draw text labels symmetrically
-        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=8.5, ha=ha_pos, va=va_pos)
-        if not is_pi2:
-            ax.text(-z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=8.5, ha='right' if z_lbl > 0 else 'left', va=va_pos)
+        # Draw text label in the first quadrant
+        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=9.0, ha=ha_pos, va=va_pos)
             
     # Grid and crosshairs
     ax.grid(True, linestyle="--", alpha=0.25, zorder=1)
-    ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.4, zorder=2)
-    ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.4, zorder=2)
+    ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
+    ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
     
+    # Zoom into the first quadrant with safe margin
+    ax.set_xlim(-150, 5700)
+    ax.set_ylim(-150, 5700)
     ax.set_aspect('equal')
-    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-X Plane Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=13, fontweight='bold', pad=15)
+    
+    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-X First Quadrant Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=13, fontweight='bold', pad=15)
     ax.set_xlabel("Z coordinate (Beamline) [mm]", fontsize=10)
-    ax.set_ylabel("X coordinate [mm]", fontsize=10)
+    ax.set_ylabel("X coordinate (Radius) [mm]", fontsize=10)
     
     # Custom legend
     legend_elements_long = [
-        Line2D([0], [0], color='#2ecc71', linewidth=2.0, label='Barrel Region (52 x 2 slices)'),
-        Line2D([0], [0], color='#e74c3c', linewidth=2.0, label='Endcap Region (40 x 2 slices)'),
-        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.6, label='Barrel-Endcap Bound (θ ≈ 0.61 rad)'),
-        Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.0, label='Kinematic Bin Bounds (0.15, 0.30, 0.90 rad)')
+        Line2D([0], [0], color='#2ecc71', linewidth=2.5, label='Barrel Region (52 slices)'),
+        Line2D([0], [0], color='#e74c3c', linewidth=2.5, label='Endcap Region (40 slices)'),
+        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.8, label='Barrel-Endcap Bound (θ ≈ 0.61 rad)'),
+        Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.2, label='Kinematic Bin Bounds (0.15, 0.30, 0.90 rad)')
     ]
-    ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9)
+    ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9.5)
     
     # Save longitudinal plots
     long_png = "plots/figures/calorimeter_longitudinal_section.png"
@@ -224,6 +212,5 @@ def main():
     print(f"  - Longitudinal Section (Z-X):")
     print(f"    * PNG: {long_png}")
     print(f"    * PDF: {long_pdf}")
-
 if __name__ == "__main__":
     main()
