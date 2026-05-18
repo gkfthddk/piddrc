@@ -42,7 +42,7 @@ def main():
     # 1. Generate Transverse Cross-Section (X-Y Plane at Z = 0)
     # -----------------------------------------------------------------
     print("\nGenerating Transverse Cross-Section (X-Y Plane at Z=0)...")
-    fig, ax = plt.subplots(figsize=(6, 10))
+    fig, ax = plt.subplots(figsize=(8, 8))
     
     import matplotlib.patches as patches
     
@@ -64,12 +64,13 @@ def main():
     # Step size for 283 slices in radians
     dphi = 2 * np.pi / 283
     
-    # Define active incident towers overlapping the simulated range phi in [0.0, 0.044] rad
+    # Define active incident towers and a sweeping 90-degree quadrant of context towers
     active_indices = [0, 1, 2]
-    context_indices = [280, 281, 282, 3, 4, 5]
+    # Sweep from slightly below the vertical axis (phi_idx 280) to slightly beyond the horizontal axis (phi_idx 75)
+    quadrant_indices = list(range(0, 76)) + list(range(280, 283))
     
-    # Draw only the relevant wedges for particle incidence (Y is mapped horizontally, X vertically)
-    for phi_idx in (active_indices + context_indices):
+    # Draw the sweeping quadrant wedges (Y is mapped horizontally, X vertically)
+    for phi_idx in quadrant_indices:
         phi_center = phi_idx * dphi
         phi_start = phi_center - dphi / 2
         phi_end = phi_center + dphi / 2
@@ -102,7 +103,7 @@ def main():
         else:
             poly = patches.Polygon(
                 pts, closed=True, edgecolor='#bdc3c7', facecolor='none', 
-                linewidth=0.5, linestyle=':', alpha=0.5, zorder=3, label='Surrounding Tower (Context)' if phi_idx == 3 else ""
+                linewidth=0.4, linestyle='-', alpha=0.3, zorder=2, label='Surrounding Tower (Context)' if phi_idx == 3 else ""
             )
         ax.add_patch(poly)
         
@@ -128,9 +129,9 @@ def main():
             label='Incident Particle Ray' if r_idx == 0 else ""
         )
         
-    # Beautiful text label for the incident beam with a clean white bbox (centered inside the inner radius)
+    # Beautiful text label for the incident beam with a clean white bbox (placed elegantly inside the arc)
     bbox_style = dict(facecolor='white', edgecolor='none', alpha=0.85, boxstyle='round,pad=0.2')
-    ax.text(100, 1200, "Incident Particle Beam\n" + r"$\phi \in [0.0, 0.044]$ rad", 
+    ax.text(300, 1200, "Incident Particle Beam\n" + r"$\phi \in [0.0, 0.044]$ rad", 
             color='#d35400', fontsize=11.0, ha='left', va='center', bbox=bbox_style, zorder=6)
     
     # Grid and crosshairs
@@ -139,8 +140,8 @@ def main():
     ax.axvline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.4, zorder=2)
     
     # Zoom precisely into the incident sector (Y horizontal, X vertical)
-    ax.set_xlim(-1000, 1000)
-    ax.set_ylim(-150, 4200)
+    ax.set_xlim(-400, 4200)
+    ax.set_ylim(-400, 4200)
     ax.set_aspect('equal')
     ax.tick_params(axis='both', which='major', labelsize=11.5)
     
@@ -151,7 +152,7 @@ def main():
     # Custom legend (increased font size)
     legend_elements = [
         Line2D([0], [0], color='#3498db', linewidth=6.0, alpha=0.75, label='Active Towers (Simulated Beam)'),
-        Line2D([0], [0], color='#bdc3c7', linestyle=':', linewidth=1.5, label='Surrounding Context Towers'),
+        Line2D([0], [0], color='#bdc3c7', linestyle='-', linewidth=1.5, alpha=0.5, label='Surrounding Context Towers'),
         Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.2, label='Incident Particle Ray'),
         Line2D([0], [0], color='#2f3640', linestyle=':', linewidth=1.2, alpha=0.5, label=f'Inner Radius ({mean_inner_r:.1f} mm)'),
         Line2D([0], [0], color='#2f3640', linestyle='--', linewidth=1.2, alpha=0.5, label=f'Outer Radius ({mean_outer_r:.1f} mm)')
