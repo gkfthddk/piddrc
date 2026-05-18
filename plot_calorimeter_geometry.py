@@ -196,16 +196,28 @@ def main():
     # Draw Barrel-Endcap and Kinematic performance division boundary lines
     # Theta edges: 0.15, 0.3, barrel_theta_min (0.613626), 0.9, 1.5708
     theta_edges = [0.15, 0.3, 0.613626, 0.9, 1.5708]
-    r_max = 5200.0
-    r_label = 5400.0
     
     for edge in theta_edges:
-        zb = r_max * np.cos(edge)
-        xb = r_max * np.sin(edge)
-        
         # Determine styling: all kinematic and barrel-endcap bounds are unified as dashed orange lines
         is_bt = abs(edge - 0.613626) < 1e-4
         is_pi2 = abs(edge - 1.5708) < 1e-3
+        
+        # Dynamically set ray length and text placement radius to stay outside the calorimeter
+        if is_bt:
+            r_max = 5300.0
+            r_label = 5250.0
+        elif abs(edge - 0.9) < 1e-4:
+            r_max = 5200.0
+            r_label = 5150.0
+        elif is_pi2:
+            r_max = 4900.0
+            r_label = 4850.0
+        else:
+            r_max = 4900.0
+            r_label = 4800.0
+            
+        zb = r_max * np.cos(edge)
+        xb = r_max * np.sin(edge)
         
         color = '#e67e22'
         ls = '--'
@@ -225,36 +237,46 @@ def main():
         else:
             lbl_text = f"{edge:.2f} rad"
             
-        ha_pos = 'center'
-        va_pos = 'bottom'
-        if edge < 0.2:
+        # Optimize alignment per ray angle to avoid overlapping the line
+        if is_pi2:
+            ha_pos = 'center'
+            va_pos = 'bottom'
+        elif is_bt or abs(edge - 0.9) < 1e-4:
+            ha_pos = 'left'
+            va_pos = 'bottom'
+        else:
             ha_pos = 'left'
             va_pos = 'center'
             
-        # Draw text label in the first quadrant
-        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=9.0, ha=ha_pos, va=va_pos)
+        # Elegant white bbox to prevent overlapping with grid lines or tower blocks
+        bbox_style = dict(facecolor='white', edgecolor='none', alpha=0.85, boxstyle='round,pad=0.2')
+            
+        # Draw text label in the first quadrant (increased font size + bbox)
+        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=11.0, 
+                ha=ha_pos, va=va_pos, bbox=bbox_style, zorder=6)
             
     # Grid and crosshairs
     ax.grid(True, linestyle="--", alpha=0.25, zorder=1)
     ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
     ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5, zorder=2)
     
-    # Zoom into the first quadrant with safe margin
-    ax.set_xlim(-150, 5700)
-    ax.set_ylim(-150, 5700)
+    # Zoom into the first quadrant, setting axes up to 5000 mm (with 200mm margin for label clearance)
+    ax.set_xlim(-100, 5200)
+    ax.set_ylim(-100, 5200)
     ax.set_aspect('equal')
+    ax.tick_params(axis='both', which='major', labelsize=11.5)
     
-    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-X First Quadrant Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=13, fontweight='bold', pad=15)
-    ax.set_xlabel("Z coordinate (Beamline) [mm]", fontsize=10)
-    ax.set_ylabel("X coordinate (Radius) [mm]", fontsize=10)
+    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-X First Quadrant Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=15.0, fontweight='bold', pad=15)
+    ax.set_xlabel("Z coordinate (Beamline) [mm]", fontsize=12.5)
+    ax.set_ylabel("X coordinate (Radius) [mm]", fontsize=12.5)
     
-    # Custom legend
+    # Custom legend (increased font size)
     legend_elements_long = [
         Line2D([0], [0], color='#2ecc71', linewidth=2.5, label='Barrel Region (52 slices)'),
         Line2D([0], [0], color='#e74c3c', linewidth=2.5, label='Endcap Region (40 slices)'),
         Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.3, label='Kinematic Bin Boundaries')
     ]
-    ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9.5)
+    ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=11.0)
     
     # Save longitudinal plots
     long_png = "plots/figures/calorimeter_longitudinal_section.png"
