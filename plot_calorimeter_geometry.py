@@ -106,9 +106,9 @@ def main():
     plt.close()
     
     # -----------------------------------------------------------------
-    # 2. Generate Longitudinal Cross-Section (Z-Y Plane)
+    # 2. Generate Longitudinal Cross-Section (Z-X Plane)
     # -----------------------------------------------------------------
-    print("Generating Longitudinal Cross-Section (Z-Y Plane)...")
+    print("Generating Longitudinal Cross-Section (Z-X Plane)...")
     fig, ax = plt.subplots(figsize=(11, 6.5))
     
     # We choose phi slice 0 to show the full profile along Z
@@ -134,10 +134,10 @@ def main():
         color = '#2ecc71' if is_barrel else '#e74c3c'
         alpha = 0.85 if is_barrel else 0.75
         
-        # Draw the line representing the longitudinal profile of each projective tower
-        ax.plot([iz, oz], [iy, oy], color=color, linewidth=1.4, alpha=alpha)
+        # Draw the line representing the longitudinal profile of each projective tower (Z-X plane)
+        ax.plot([iz, oz], [ix, ox], color=color, linewidth=1.4, alpha=alpha)
         # Mirror along the beamline to show the full circular/cylindrical profile
-        ax.plot([iz, oz], [-iy, -oy], color=color, linewidth=1.4, alpha=alpha)
+        ax.plot([iz, oz], [-ix, -ox], color=color, linewidth=1.4, alpha=alpha)
         
     # Grid and crosshairs
     ax.grid(True, linestyle="--", alpha=0.25, zorder=1)
@@ -145,9 +145,9 @@ def main():
     ax.axvline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.4, zorder=2)
     
     ax.set_aspect('equal')
-    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-Y Plane Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=13, fontweight='bold', pad=15)
+    ax.set_title("Calorimeter Longitudinal Cross-Section (Z-X Plane Profile)\nProjective Barrel & Endcap Tower Modules", fontsize=13, fontweight='bold', pad=15)
     ax.set_xlabel("Z coordinate (Beamline) [mm]", fontsize=10)
-    ax.set_ylabel("Y coordinate [mm]", fontsize=10)
+    ax.set_ylabel("X coordinate [mm]", fontsize=10)
     
     # Custom legend
     legend_elements_long = [
@@ -168,7 +168,7 @@ def main():
     print(f"  - Transverse Section (X-Y):")
     print(f"    * PNG: {trans_png}")
     print(f"    * PDF: {trans_pdf}")
-    print(f"  - Longitudinal Section (Z-Y):")
+    print(f"  - Longitudinal Section (Z-X):")
     print(f"    * PNG: {long_png}")
     print(f"    * PDF: {long_pdf}")
 
