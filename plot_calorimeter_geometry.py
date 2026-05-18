@@ -139,24 +139,57 @@ def main():
         # Mirror along the beamline to show the full circular/cylindrical profile
         ax.plot([iz, oz], [-ix, -ox], color=color, linewidth=1.4, alpha=alpha)
         
-    # Draw Barrel-Endcap angular performance division boundary lines
-    # Theta = 35.16 degrees (0.613626 rad)
-    theta_b_rad = 0.613626
+    # Draw Barrel-Endcap and Kinematic performance division boundary lines
+    # Theta edges: 0.15, 0.3, barrel_theta_min (0.613626), 0.9, 1.5708
+    theta_edges = [0.15, 0.3, 0.613626, 0.9, 1.5708]
     r_max = 5200.0
-    zb = r_max * np.cos(theta_b_rad)
-    xb = r_max * np.sin(theta_b_rad)
+    r_label = 5450.0
     
-    # Positive X side division rays
-    ax.plot([0, zb], [0, xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
-    ax.plot([0, -zb], [0, xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
-    # Negative X side division rays (mirrored)
-    ax.plot([0, zb], [0, -xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
-    ax.plot([0, -zb], [0, -xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
-    
-    # Text labels for the boundary angles
-    ax.text(zb * 0.90, xb * 0.96, r'$\theta = 35.2^\circ$', color='#d35400', fontweight='bold', fontsize=9.5, ha='center', va='bottom')
-    ax.text(-zb * 0.90, xb * 0.96, r'$\theta = 144.8^\circ$', color='#d35400', fontweight='bold', fontsize=9.5, ha='center', va='bottom')
-    
+    for edge in theta_edges:
+        zb = r_max * np.cos(edge)
+        xb = r_max * np.sin(edge)
+        
+        # Determine styling: barrel_theta_min is the physical boundary (prominent gold dash-dot),
+        # pi/2 is the midplane, others are kinematic bins (dashed orange)
+        is_bt = abs(edge - 0.613626) < 1e-4
+        is_pi2 = abs(edge - 1.5708) < 1e-3
+        
+        color = '#f1c40f' if is_bt else '#e67e22'
+        ls = '-.' if is_bt else '--'
+        lw = 1.6 if is_bt else 1.0
+        
+        # Plot rays (Positive X side)
+        ax.plot([0, zb], [0, xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
+        if not is_pi2:
+            ax.plot([0, -zb], [0, xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
+            
+        # Plot rays (Negative X side / mirrored)
+        ax.plot([0, zb], [0, -xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
+        if not is_pi2:
+            ax.plot([0, -zb], [0, -xb], color=color, linestyle=ls, linewidth=lw, zorder=5)
+            
+        # Text labels positioning and formatting
+        z_lbl = r_label * np.cos(edge)
+        x_lbl = r_label * np.sin(edge)
+        
+        if is_bt:
+            lbl_text = r"$\theta_{min}^{barrel} \approx 0.61$ rad"
+        elif is_pi2:
+            lbl_text = r"$\pi/2 \approx 1.57$ rad"
+        else:
+            lbl_text = f"{edge:.2f} rad"
+            
+        ha_pos = 'center'
+        va_pos = 'bottom'
+        if edge < 0.2:
+            ha_pos = 'left' if z_lbl > 0 else 'right'
+            va_pos = 'center'
+            
+        # Draw text labels symmetrically
+        ax.text(z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=8.5, ha=ha_pos, va=va_pos)
+        if not is_pi2:
+            ax.text(-z_lbl, x_lbl, lbl_text, color='#d35400', fontweight='bold', fontsize=8.5, ha='right' if z_lbl > 0 else 'left', va=va_pos)
+            
     # Grid and crosshairs
     ax.grid(True, linestyle="--", alpha=0.25, zorder=1)
     ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.4, zorder=2)
@@ -171,7 +204,8 @@ def main():
     legend_elements_long = [
         Line2D([0], [0], color='#2ecc71', linewidth=2.0, label='Barrel Region (52 x 2 slices)'),
         Line2D([0], [0], color='#e74c3c', linewidth=2.0, label='Endcap Region (40 x 2 slices)'),
-        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.5, label='Performance Div. Bound (θ = 35.2°)')
+        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.6, label='Barrel-Endcap Bound (θ ≈ 0.61 rad)'),
+        Line2D([0], [0], color='#e67e22', linestyle='--', linewidth=1.0, label='Kinematic Bin Bounds (0.15, 0.30, 0.90 rad)')
     ]
     ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9)
     
