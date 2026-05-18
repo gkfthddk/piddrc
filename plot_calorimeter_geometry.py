@@ -44,27 +44,52 @@ def main():
     print("\nGenerating Transverse Cross-Section (X-Y Plane at Z=0)...")
     fig, ax = plt.subplots(figsize=(9, 9))
     
+    import matplotlib.patches as patches
+    
     # Use the central barrel ring (theta slice 0)
     theta_idx = 0
     inner_radii = []
     outer_radii = []
     
-    # Plot all 283 projective towers around the circle
+    # Calculate constant inner and outer radius first
     for phi_idx in range(n_phi):
-        # Inner face center (head)
         ix, iy, iz = geo.head[phi_idx][theta_idx]
-        # Outer face center (tail/sipm layer)
         ox, oy, oz = geo.sipmlayer[phi_idx][theta_idx]
-        
-        # Draw the projective radial line representing the tower volume
-        ax.plot([ix, ox], [iy, oy], color='#00a8ff', linewidth=1.0, alpha=0.75, zorder=3)
-        
         inner_radii.append(np.sqrt(ix**2 + iy**2))
         outer_radii.append(np.sqrt(ox**2 + oy**2))
         
     mean_inner_r = np.mean(inner_radii)
     mean_outer_r = np.mean(outer_radii)
     
+    # Step size for 283 slices in radians
+    dphi = 2 * np.pi / 283
+    
+    # Draw all 283 projective towers as solid quadrilateral slices
+    for phi_idx in range(n_phi):
+        phi_center = phi_idx * dphi
+        phi_start = phi_center - dphi / 2
+        phi_end = phi_center + dphi / 2
+        
+        # Corner 1: Inner start
+        x1 = mean_inner_r * np.cos(phi_start)
+        y1 = mean_inner_r * np.sin(phi_start)
+        
+        # Corner 2: Inner end
+        x2 = mean_inner_r * np.cos(phi_end)
+        y2 = mean_inner_r * np.sin(phi_end)
+        
+        # Corner 3: Outer end
+        x3 = mean_outer_r * np.cos(phi_end)
+        y3 = mean_outer_r * np.sin(phi_end)
+        
+        # Corner 4: Outer start
+        x4 = mean_outer_r * np.cos(phi_start)
+        y4 = mean_outer_r * np.sin(phi_start)
+        
+        pts = np.array([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
+        poly = patches.Polygon(pts, closed=True, edgecolor='#2c3e50', facecolor='#3498db', linewidth=0.4, alpha=0.6, zorder=3)
+        ax.add_patch(poly)
+        
     # Draw perfect concentric circle boundaries representing inner and outer calorimeter envelopes
     inner_c = plt.Circle(
         (0, 0), mean_inner_r, color='#2f3640', fill=False, 
@@ -91,7 +116,7 @@ def main():
     
     # Custom legend
     legend_elements = [
-        Line2D([0], [0], color='#00a8ff', linewidth=1.5, label='Projective Tower Axials'),
+        Line2D([0], [0], color='#3498db', linewidth=6.0, alpha=0.6, label='Projective Barrel Towers (283 wedges)'),
         Line2D([0], [0], color='#2f3640', linestyle=':', linewidth=1.5, label=f'Inner Radius ({mean_inner_r:.1f} mm)'),
         Line2D([0], [0], color='#2f3640', linestyle='--', linewidth=1.5, label=f'Outer Radius ({mean_outer_r:.1f} mm)')
     ]
@@ -111,26 +136,58 @@ def main():
     print("Generating Longitudinal Cross-Section (Z-X Plane, First Quadrant)...")
     fig, ax = plt.subplots(figsize=(9, 8))
     
-    # We choose phi slice 0 to show the full profile along Z
-    phi_idx = 0
+    import xml.etree.ElementTree as ET
+    import matplotlib.patches as patches
     
-    # First Quadrant: positive Z side (theta indices 0 to 91)
-    theta_indices = list(range(0, n_theta))
+    # Parse XML directly to compute exact tower boundaries
+    root = ET.parse(xml_path).getroot()
     
-    for theta_idx in theta_indices:
-        # Inner face center (head)
-        ix, iy, iz = geo.head[phi_idx][theta_idx]
+    for component in ["barrel", "endcap"]:
+        detector = f'detectors/detector/{component}'
+        height = float(root.find(detector).get("height").split("*")[0]) * 1000
+        rmin = float(root.find(detector).get("rmin").split("*")[0]) * 1000
+        fInnerX = rmin
+        currentTheta = float(root.find(detector).get("theta"))
         
-        # Outer face center (tail)
-        ox, oy, oz = geo.sipmlayer[phi_idx][theta_idx]
+        # Color-code based on component
+        color = '#2ecc71' if component == "barrel" else '#e74c3c'
+        alpha = 0.65 if component == "barrel" else 0.55  # slightly transparent fill to show overlap/grid
         
-        # Color-code: barrel is first 52 slices, endcap is last 40 slices
-        is_barrel = theta_idx < 52
-        color = '#2ecc71' if is_barrel else '#e74c3c'
-        alpha = 0.85 if is_barrel else 0.75
-        
-        # Draw the line representing the longitudinal profile of each projective tower (Z-X plane, First Quadrant)
-        ax.plot([iz, oz], [ix, ox], color=color, linewidth=1.6, alpha=alpha)
+        for line in root.find(detector):
+            deltatheta = float(line.get('deltatheta'))
+            theta_start = currentTheta
+            theta_end = currentTheta + deltatheta
+            currentToC = currentTheta + deltatheta / 2.
+            currentTheta += deltatheta
+            
+            if component == "barrel":
+                fCurrentInnerR = fInnerX / np.cos(currentToC)
+            else:
+                fCurrentInnerR = fInnerX / np.sin(currentToC)
+                
+            r_inner = fCurrentInnerR
+            r_outer = fCurrentInnerR + height
+            
+            # Corner 1: Inner start
+            z1 = r_inner * np.sin(theta_start)
+            x1 = r_inner * np.cos(theta_start)
+            
+            # Corner 2: Inner end
+            z2 = r_inner * np.sin(theta_end)
+            x2 = r_inner * np.cos(theta_end)
+            
+            # Corner 3: Outer end
+            z3 = r_outer * np.sin(theta_end)
+            x3 = r_outer * np.cos(theta_end)
+            
+            # Corner 4: Outer start
+            z4 = r_outer * np.sin(theta_start)
+            x4 = r_outer * np.cos(theta_start)
+            
+            # Create and draw the quadrilateral polygon representing the tower profile
+            pts = np.array([[z1, x1], [z2, x2], [z3, x3], [z4, x4]])
+            poly = patches.Polygon(pts, closed=True, edgecolor='#2c3e50', facecolor=color, linewidth=0.5, alpha=alpha, zorder=3)
+            ax.add_patch(poly)
         
     # Draw Barrel-Endcap and Kinematic performance division boundary lines
     # Theta edges: 0.15, 0.3, barrel_theta_min (0.613626), 0.9, 1.5708
