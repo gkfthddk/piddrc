@@ -139,6 +139,24 @@ def main():
         # Mirror along the beamline to show the full circular/cylindrical profile
         ax.plot([iz, oz], [-ix, -ox], color=color, linewidth=1.4, alpha=alpha)
         
+    # Draw Barrel-Endcap angular performance division boundary lines
+    # Theta = 35.16 degrees (0.613626 rad)
+    theta_b_rad = 0.613626
+    r_max = 5200.0
+    zb = r_max * np.cos(theta_b_rad)
+    xb = r_max * np.sin(theta_b_rad)
+    
+    # Positive X side division rays
+    ax.plot([0, zb], [0, xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
+    ax.plot([0, -zb], [0, xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
+    # Negative X side division rays (mirrored)
+    ax.plot([0, zb], [0, -xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
+    ax.plot([0, -zb], [0, -xb], color='#f1c40f', linestyle='-.', linewidth=1.5, zorder=5)
+    
+    # Text labels for the boundary angles
+    ax.text(zb * 0.90, xb * 0.96, r'$\theta = 35.2^\circ$', color='#d35400', fontweight='bold', fontsize=9.5, ha='center', va='bottom')
+    ax.text(-zb * 0.90, xb * 0.96, r'$\theta = 144.8^\circ$', color='#d35400', fontweight='bold', fontsize=9.5, ha='center', va='bottom')
+    
     # Grid and crosshairs
     ax.grid(True, linestyle="--", alpha=0.25, zorder=1)
     ax.axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.4, zorder=2)
@@ -151,8 +169,9 @@ def main():
     
     # Custom legend
     legend_elements_long = [
-        Line2D([0], [0], color='#2ecc71', linewidth=2.0, label='Barrel Towers (52 x 2 slices)'),
-        Line2D([0], [0], color='#e74c3c', linewidth=2.0, label='Endcap Towers (40 x 2 slices)')
+        Line2D([0], [0], color='#2ecc71', linewidth=2.0, label='Barrel Region (52 x 2 slices)'),
+        Line2D([0], [0], color='#e74c3c', linewidth=2.0, label='Endcap Region (40 x 2 slices)'),
+        Line2D([0], [0], color='#f1c40f', linestyle='-.', linewidth=1.5, label='Performance Div. Bound (θ = 35.2°)')
     ]
     ax.legend(handles=legend_elements_long, loc='upper right', frameon=True, fontsize=9)
     
